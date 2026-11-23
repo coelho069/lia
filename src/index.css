@@ -1,0 +1,32 @@
+/* Tailwind CSS v4 - Theme variables */
+:root {
+  --bg: #f0f4f8;
+  --card: #ffffff;
+  --border: #d0d7e0;
+  --pet: #8b5a2b;
+  --spike: #5a3e25;
+  --face: #f5e1a4;
+  --sky: #87CEEB;
+  --green: #22c55e;
+  --yellow: #f59e0b;
+  --text: #6b6375;
+  --text-h: #08060d;
+}
+
+/* Base styles */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+/* Prevent horizontal overflow on mobile */
+html, body #root .app {
+  overflow-x: hidden;
+}
