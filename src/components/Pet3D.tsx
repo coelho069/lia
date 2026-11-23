@@ -23,6 +23,12 @@ export function Pet3D({
   const ref = useRef<HTMLDivElement>(null);
   const cbRef = useRef(onPetPositionChange);
   cbRef.current = onPetPositionChange;
+  const lifeRef = useRef(life);
+  lifeRef.current = life;
+  const pesquisandoRef = useRef(pesquisando);
+  pesquisandoRef.current = pesquisando;
+  const temaPesquisaRef = useRef(temaPesquisa);
+  temaPesquisaRef.current = temaPesquisa;
 
   useEffect(() => {
     const container = ref.current;
@@ -124,24 +130,17 @@ export function Pet3D({
     suporte.position.set(0, 0.5, -0.3);
     compGroup.add(suporte);
 
-    // Tela do monitor (mostra tema da pesquisa)
-    const telaMat = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
-    const tela = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.82), telaMat);
-    tela.position.set(0, 0.95, -0.2);
-    tela.lookAt(new THREE.Vector3(0, 0.95, -1));
-    compGroup.add(tela);
-
-    // Referência para atualizar texto da tela (via texture canvas)
+    // Tela do monitor (mostra tema da pesquisa via canvas texture)
     const canvas = document.createElement("canvas");
     canvas.width = 256;
     canvas.height = 256;
     const ctx = canvas.getContext("2d")!;
     const telaTexture = new THREE.CanvasTexture(canvas);
-    const telaMat2 = new THREE.MeshBasicMaterial({ map: telaTexture });
-    const tela2 = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.82), telaMat2);
-    tela2.position.set(0, 0.95, -0.2);
-    tela2.lookAt(new THREE.Vector3(0, 0.95, -1));
-    compGroup.add(tela2);
+    const telaMat = new THREE.MeshBasicMaterial({ map: telaTexture });
+    const tela = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.82), telaMat);
+    tela.position.set(0, 0.95, -0.2);
+    tela.lookAt(new THREE.Vector3(0, 0.95, -1));
+    compGroup.add(tela);
 
     function desenharTela(texto: string) {
       const c = canvas;
@@ -161,7 +160,7 @@ export function Pet3D({
       telaTexture.needsUpdate = true;
     }
 
-    desenharTela(temaPesquisa || "");
+    desenharTela(temaPesquisaRef.current || "");
 
     // Teclado
     const teclado = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.05, 0.4), new THREE.MeshStandardMaterial({ color: 0x111111 }));
@@ -324,15 +323,15 @@ export function Pet3D({
 
     const chooseDestination = () => {
       // Se estiver pesquisando, ir para o computador
-      if (pesquisando) {
+      if (pesquisandoRef.current) {
         return destinos.find((d) => d.nome === "computador") ?? destinos[0];
       }
       // Decide baseado nas necessidades da vida
-      const fome = life?.fome ?? 70;
-      const energia = life?.energia ?? 80;
-      const humor = life?.humor ?? 70;
-      const sociability = life?.sociability ?? 60;
-      const acao = life?.acaoAtual ?? null;
+      const fome = lifeRef.current?.fome ?? 70;
+      const energia = lifeRef.current?.energia ?? 80;
+      const humor = lifeRef.current?.humor ?? 70;
+      const sociability = lifeRef.current?.sociability ?? 60;
+      const acao = lifeRef.current?.acaoAtual ?? null;
 
       if (acao === "dormir" || energia < 25) {
         return destinos.find((d) => d.nome === "casa") ?? destinos[0];
@@ -367,6 +366,23 @@ export function Pet3D({
 
     pickNext();
 
+    const quebrarTexto = (texto: string, ctx: CanvasRenderingContext2D, maxWidth: number): string[] => {
+      const palavras = texto.split(" ");
+      const linhas: string[] = [];
+      let linhaAtual = "";
+      for (const palavra of palavras) {
+        const teste = linhaAtual ? linhaAtual + " " + palavra : palavra;
+        if (ctx.measureText(teste).width > maxWidth) {
+          if (linhaAtual) linhas.push(linhaAtual);
+          linhaAtual = palavra;
+        } else {
+          linhaAtual = teste;
+        }
+      }
+      if (linhaAtual) linhas.push(linhaAtual);
+      return linhas;
+    };
+
     const onDown = (e: PointerEvent) => { dragging = true; lastX = e.clientX; lastY = e.clientY; };
     const onMove = (e: PointerEvent) => {
       if (dragging === false) return;
@@ -391,28 +407,11 @@ export function Pet3D({
     renderer.domElement.addEventListener("pointerup", onUp);
     renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
 
-    const quebrarTexto = (texto: string, ctx: CanvasRenderingContext2D, maxWidth: number): string[] => {
-      const palavras = texto.split(" ");
-      const linhas: string[] = [];
-      let linhaAtual = "";
-      for (const palavra of palavras) {
-        const teste = linhaAtual ? linhaAtual + " " + palavra : palavra;
-        if (ctx.measureText(teste).width > maxWidth) {
-          if (linhaAtual) linhas.push(linhaAtual);
-          linhaAtual = palavra;
-        } else {
-          linhaAtual = teste;
-        }
-      }
-      if (linhaAtual) linhas.push(linhaAtual);
-      return linhas;
-    };
-
     const animate = () => {
       raf = requestAnimationFrame(animate);
 
       // Se pesquisando e chegou no computador, para de andar
-      if (pesquisando && destinoAtual && destinoAtual.nome === "computador") {
+      if (pesquisandoRef.current && destinoAtual && destinoAtual.nome === "computador") {
         const dx = targetX - px;
         const dz = targetZ - pz;
         const dist = Math.sqrt(dx * dx + dz * dz);
@@ -427,8 +426,12 @@ export function Pet3D({
           person.rotation.y = Math.atan2(dx, dz);
           walkCycle = 0;
         }
-      } else if (!pesquisando) {
+      } else if (!pesquisandoRef.current) {
         // Caminhada normal
+        if (lifeRef.current && waitTimer <= 0 && !isWalking) {
+          pickNext();
+        }
+
         if (isWalking && destinoAtual) {
           const dx = targetX - px;
           const dz = targetZ - pz;
@@ -485,6 +488,11 @@ export function Pet3D({
         torso.rotation.z = 0;
       }
 
+      // Atualizar tela do monitor se o tema mudou
+      if (temaPesquisaRef.current) {
+        desenharTela(temaPesquisaRef.current);
+      }
+
       fireflies.rotation.y += 0.002;
       camera.position.set(px + camDist * Math.sin(theta), camHeight, pz + camDist * Math.cos(theta));
       camera.lookAt(px, 1, pz);
@@ -510,7 +518,7 @@ export function Pet3D({
       if (container.contains(renderer.domElement)) { container.removeChild(renderer.domElement); }
       renderer.dispose();
     };
-  }, [life, pesquisando, temaPesquisa]);
+  }, []);
 
   return <div ref={ref} style={{ width: "100%", height: "100%" }} />;
 }
