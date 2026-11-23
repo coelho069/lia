@@ -2,6 +2,14 @@ import React, { useEffect, useRef, useState } from "react";
 import { Pet3D } from "./components/Pet3D";
 import { safeId } from "./utils/safeId";
 import { supabase } from "./supabase";
+import type { LifeState } from "./life";
+import {
+  createInitialLife,
+  loadLife,
+  saveLife,
+  tickLife,
+  decideNextAction,
+} from "./life";
 
 // ============================================================
 // LOGIN GATE - Front-end gate hides the app but does not protect
@@ -167,6 +175,13 @@ export const App: React.FC = () => {
   // Store callbacks in a ref, never put a new inline callback in the useEffect deps.
   const onPetPositionChangeRef = useRef(() => {});
 
+  // --- Estado de vida da Lia (Matrix) ---
+  const [life, setLife] = useState<LifeState>(loadLife());
+  // Ciclo dia/noite: 0-23 (hora do dia). 6-18 dia, 18-6 noite.
+  const [hour, setHour] = useState(6);
+  // Última ação executada pela Lia (para exibir no painel)
+  const [lastAction, setLastAction] = useState<string | null>(null);
+
   // --- Sessão: checa o Supabase primeiro; IP só como fallback ----------
   // Mantém o login após reload via supabase.auth.getSession() e onAuthStateChange.
   useEffect(() => {
@@ -214,6 +229,73 @@ export const App: React.FC = () => {
     return () => {
       mounted = false;
       authData?.subscription?.unsubscribe();
+    };
+  }, []);
+
+  // --- Ciclo de vida da Lia: tick, dia/noite, decisão automática, auto-save ---
+  useEffect(() => {
+    let mounted = true;
+    let tickTimer: any;
+    let hourTimer: any;
+    let decisionTimer: any;
+
+    const TICK_INTERVAL_MS = 4000; // vida decai a cada 4s
+    const HOUR_INTERVAL_MS = 10000; // hora avança a cada 10s
+    const DECISION_INTERVAL_MS = 15000; // Lia decide a cada 15s
+
+    const doTick = () => {
+      setLife((prev) => {
+        const next = tickLife(prev);
+        saveLife(next);
+        return next;
+      });
+    };
+
+    const advanceHour = () => {
+      setHour((h) => (h + 1) % 24);
+    };
+
+    const doDecision = () => {
+      setLife((prev) => {
+        const { action, actionText } = decideNextAction(prev);
+        let next = { ...prev, acaoAtual: action, ultimaAcaoEm: Date.now() };
+
+        // Aplicar efeitos da ação nos atributos
+        if (action === "dormir") {
+          next = { ...next, energia: Math.min(100, next.energia + 30), humor: Math.min(100, next.humor + 10) };
+        } else if (action === "comer") {
+          next = { ...next, fome: Math.min(100, next.fome + 30), energia: Math.min(100, next.energia + 10) };
+        } else if (action === "brincar") {
+          next = { ...next, humor: Math.min(100, next.humor + 15), energia: Math.max(0, next.energia - 10) };
+        } else if (action === "conversar") {
+          next = { ...next, sociability: Math.min(100, next.sociability + 15), humor: Math.min(100, next.humor + 10) };
+        } else if (action === "descansar") {
+          next = { ...next, energia: Math.min(100, next.energia + 15) };
+        } else if (action === "pesquisar") {
+          next = { ...next, xp: Math.min(999, next.xp + 10), energia: Math.max(0, next.energia - 5) };
+        } else if (action === "explorar") {
+          next = { ...next, energia: Math.max(0, next.energia - 5), sociability: Math.max(0, next.sociability - 5) };
+        }
+
+        saveLife(next);
+        setLastAction(actionText);
+        return next;
+      });
+    };
+
+    doTick();
+    advanceHour();
+    doDecision();
+
+    tickTimer = setInterval(doTick, TICK_INTERVAL_MS);
+    hourTimer = setInterval(advanceHour, HOUR_INTERVAL_MS);
+    decisionTimer = setInterval(doDecision, DECISION_INTERVAL_MS);
+
+    return () => {
+      mounted = false;
+      clearInterval(tickTimer);
+      clearInterval(hourTimer);
+      clearInterval(decisionTimer);
     };
   }, []);
 
@@ -301,6 +383,40 @@ export const App: React.FC = () => {
         >
           Sair
         </button>
+      </div>
+
+      {/* Painel Vida - lado esquerdo, sem cobrir a cena 3D */}
+      <div
+        style={{
+          position: "absolute",
+          top: 60,
+          left: 16,
+          width: 260,
+          zIndex: 5,
+          pointerEvents: "auto",
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          padding: 12,
+          background: "rgba(255,255,255,0.85)",
+          borderRadius: 8,
+        }}
+      >
+        <h2 style={{ margin: 0, fontSize: 18, color: "#1a1a2e" }}>Vida da Lia</h2>
+        <div style={{ fontSize: 13, color: "#333" }}>
+          <div>Hora: {hour.toString().padStart(2, "0")}:00 {hour >= 6 && hour < 18 ? "☀️ Dia" : "🌙 Noite"}</div>
+          <div style={{ marginTop: 4 }}>Fome: {Math.round(life.fome)}</div>
+          <div>Energia: {Math.round(life.energia)}</div>
+          <div>Humor: {Math.round(life.humor)}</div>
+          <div>Social: {Math.round(life.sociability)}</div>
+          <div>Saúde: {Math.round(life.saude)}</div>
+          <div>XP: {life.xp} (Capítulo {life.chapter})</div>
+          {lastAction && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "#555", fontStyle: "italic" }}>
+              {lastAction}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 3D World - Pet3D */}
