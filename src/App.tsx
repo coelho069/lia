@@ -181,6 +181,11 @@ export const App: React.FC = () => {
   const [hour, setHour] = useState(6);
   // Última ação executada pela Lia (para exibir no painel)
   const [lastAction, setLastAction] = useState<string | null>(null);
+  // --- Estado de pesquisa da Lia ---
+  const [pesquisando, setPesquisando] = useState(false);
+  const [temaPesquisa, setTemaPesquisa] = useState("");
+  const [resultadoPesquisa, setResultadoPesquisa] = useState<{ tema: string; resumo: string; link: string } | null>(null);
+  const [ultimaPesquisaEm, setUltimaPesquisaEm] = useState(0);
 
   // --- Sessão: checa o Supabase primeiro; IP só como fallback ----------
   // Mantém o login após reload via supabase.auth.getSession() e onAuthStateChange.
@@ -273,6 +278,8 @@ export const App: React.FC = () => {
           next = { ...next, energia: Math.min(100, next.energia + 15) };
         } else if (action === "pesquisar") {
           next = { ...next, xp: Math.min(999, next.xp + 10), energia: Math.max(0, next.energia - 5) };
+          // Inicia pesquisa aleatória
+          void iniciarPesquisa();
         } else if (action === "explorar") {
           next = { ...next, energia: Math.max(0, next.energia - 5), sociability: Math.max(0, next.sociability - 5) };
         }
@@ -283,9 +290,72 @@ export const App: React.FC = () => {
       });
     };
 
+    const TEMA_ALEATORIO = [
+      "Brasil",
+      "Japão",
+      "Egito",
+      "França",
+      "Astronomia",
+      "Dinossauros",
+      "Música",
+      "Pintura",
+      "Culinária",
+      "Esportes",
+    ];
+
+    async function iniciarPesquisa() {
+      if (pesquisando) return;
+      const agora = Date.now();
+      if (agora - ultimaPesquisaEm < 300000) return; // 5 min entre pesquisas
+      setPesquisando(true);
+      const tema = TEMA_ALEATORIO[Math.floor(Math.random() * TEMA_ALEATORIO.length)];
+      setTemaPesquisa(tema);
+      try {
+        const res = await fetch(
+          `https://pt.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(tema)}&format=json&origin=*`,
+          { signal: AbortSignal.timeout(10000) }
+        );
+        if (!res.ok) throw new Error("Falha na Wikipedia");
+        const data = await res.json();
+        const resultado = data.query?.search?.[0];
+        if (resultado) {
+          const payload = {
+            tema: resultado.title,
+            resumo: resultado.snippet.replace(/<[^>]*>/g, ""),
+            link: `https://pt.wikipedia.org/wiki/${encodeURIComponent(resultado.title.replace(/ /g, "_"))}`,
+          };
+          setResultadoPesquisa(payload);
+          // Adiciona ao chat
+          setMessages((prev) => [
+            ...prev,
+            { from: "user", text: "Pesquisando: " + tema },
+            { from: "person", text: "Pesquisei sobre " + payload.tema + ". " + payload.resumo + " Fonte: " + payload.link },
+          ]);
+          setUltimaPesquisaEm(agora);
+        } else {
+          setMessages((prev) => [...prev, { from: "person", text: "Não encontrei nada sobre " + tema + " na Wikipedia." }]);
+        }
+      } catch {
+        setMessages((prev) => [...prev, { from: "person", text: "Não consegui pesquisar agora. A internet falhou. Tento de novo depois." }]);
+      } finally {
+        setPesquisando(false);
+      }
+    }
+
     doTick();
     advanceHour();
     doDecision();
+
+    // Pesquisa automática a cada 5 minutos
+    let pesquisaTimer: any;
+    const agendarPesquisa = () => {
+      clearTimeout(pesquisaTimer);
+      pesquisaTimer = setTimeout(() => {
+        void iniciarPesquisa();
+        agendarPesquisa();
+      }, 300000);
+    };
+    agendarPesquisa();
 
     tickTimer = setInterval(doTick, TICK_INTERVAL_MS);
     hourTimer = setInterval(advanceHour, HOUR_INTERVAL_MS);
@@ -296,8 +366,9 @@ export const App: React.FC = () => {
       clearInterval(tickTimer);
       clearInterval(hourTimer);
       clearInterval(decisionTimer);
+      clearTimeout(pesquisaTimer);
     };
-  }, []);
+  }, [life, pesquisando, ultimaPesquisaEm]);
 
   // Pet3D position callback ref (só define o ref, sem recriar callbacks a cada render).
   useEffect(() => {
@@ -421,7 +492,7 @@ export const App: React.FC = () => {
 
       {/* 3D World - Pet3D */}
       <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 0 }}>
-        <Pet3D onPetPositionChange={onPetPositionChangeRef.current} life={life} />
+        <Pet3D onPetPositionChange={onPetPositionChangeRef.current} life={life} pesquisando={pesquisando} temaPesquisa={temaPesquisa} />
       </div>
 
       {/* Chat panel - faixa só embaixo, sem cobrir a cena 3D */}

@@ -6,6 +6,8 @@ type Destino = { nome: string; x: number; z: number };
 export function Pet3D({
   onPetPositionChange,
   life,
+  pesquisando,
+  temaPesquisa,
 }: {
   onPetPositionChange?: (x: number, z: number) => void;
   life?: {
@@ -15,6 +17,8 @@ export function Pet3D({
     sociability?: number;
     acaoAtual?: string | null;
   };
+  pesquisando?: boolean;
+  temaPesquisa?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const cbRef = useRef(onPetPositionChange);
@@ -67,7 +71,7 @@ export function Pet3D({
       { nome: "casa", x: -4, z: -6 },
       { nome: "arvore", x: -6, z: -4 },
       { nome: "flores", x: 4, z: -6 },
-      { nome: "computador", x: 0, z: 0 },
+      { nome: "computador", x: 2, z: -2 },
       { nome: "lago", x: 0, z: 6 },
     ];
 
@@ -79,6 +83,116 @@ export function Pet3D({
       m.position.set(d.x, 0.06, d.z);
       scene.add(m);
     });
+
+    // Computador (mesa, monitor, teclado, cadeira) perto da casa
+    const compGroup = new THREE.Group();
+    compGroup.position.set(2, 0, -2);
+
+    // Mesa
+    const mesaMat = new THREE.MeshStandardMaterial({ color: 0x6b4a2a });
+    const mesa = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.7, 0.7), mesaMat);
+    mesa.position.y = 0.35;
+    mesa.castShadow = true;
+    mesa.receiveShadow = true;
+    compGroup.add(mesa);
+
+    // Pés da mesa
+    const peMat = new THREE.MeshStandardMaterial({ color: 0x5a3e25 });
+    const peL = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.35, 0.05), peMat);
+    peL.position.set(-0.5, 0.175, -0.25);
+    compGroup.add(peL);
+    const peR = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.35, 0.05), peMat);
+    peR.position.set(0.5, 0.175, -0.25);
+    compGroup.add(peR);
+    const peL2 = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.35, 0.05), peMat);
+    peL2.position.set(-0.5, 0.175, 0.25);
+    compGroup.add(peL2);
+    const peR2 = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.35, 0.05), peMat);
+    peR2.position.set(0.5, 0.175, 0.25);
+    compGroup.add(peR2);
+
+    // Monitor
+    const monMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
+    const monitor = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.9, 0.1), monMat);
+    monitor.position.set(0, 0.95, -0.3);
+    monitor.castShadow = true;
+    compGroup.add(monitor);
+
+    // Suporte do monitor
+    const supMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+    const suporte = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.15, 0.08), supMat);
+    suporte.position.set(0, 0.5, -0.3);
+    compGroup.add(suporte);
+
+    // Tela do monitor (mostra tema da pesquisa)
+    const telaMat = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+    const tela = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.82), telaMat);
+    tela.position.set(0, 0.95, -0.2);
+    tela.lookAt(new THREE.Vector3(0, 0.95, -1));
+    compGroup.add(tela);
+
+    // Referência para atualizar texto da tela (via texture canvas)
+    const canvas = document.createElement("canvas");
+    canvas.width = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext("2d")!;
+    const telaTexture = new THREE.CanvasTexture(canvas);
+    const telaMat2 = new THREE.MeshBasicMaterial({ map: telaTexture });
+    const tela2 = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.82), telaMat2);
+    tela2.position.set(0, 0.95, -0.2);
+    tela2.lookAt(new THREE.Vector3(0, 0.95, -1));
+    compGroup.add(tela2);
+
+    function desenharTela(texto: string) {
+      const c = canvas;
+      const cx = c.getContext("2d")!;
+      cx.fillStyle = "#000000";
+      cx.fillRect(0, 0, c.width, c.height);
+      cx.fillStyle = "#00ff00";
+      cx.font = "bold 24px monospace";
+      cx.textAlign = "center";
+      cx.textBaseline = "middle";
+      cx.fillText("PESQUISA:", c.width / 2, c.height / 2 - 40);
+      cx.font = "20px monospace";
+      const linhas = quebrarTexto(texto, cx, c.width - 40);
+      linhas.forEach((linha, i) => {
+        cx.fillText(linha, c.width / 2, c.height / 2 + i * 30);
+      });
+      telaTexture.needsUpdate = true;
+    }
+
+    desenharTela(temaPesquisa || "");
+
+    // Teclado
+    const teclado = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.05, 0.4), new THREE.MeshStandardMaterial({ color: 0x111111 }));
+    teclado.position.set(0, 0.72, 0.1);
+    compGroup.add(teclado);
+
+    // Cadeira
+    const cadeiraMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+    const cadeira = new THREE.Group();
+    const assento = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.1, 0.5), cadeiraMat);
+    assento.position.y = 0.45;
+    cadeira.add(assento);
+    const encosto = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.05), cadeiraMat);
+    encosto.position.set(0, 0.7, -0.25);
+    cadeira.add(encosto);
+    const pernaC = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.45, 0.04), cadeiraMat);
+    pernaC.position.set(-0.22, 0.225, -0.22);
+    cadeira.add(pernaC);
+    const pernaC2 = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.45, 0.04), cadeiraMat);
+    pernaC2.position.set(0.22, 0.225, -0.22);
+    cadeira.add(pernaC2);
+    const pernaC3 = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.45, 0.04), cadeiraMat);
+    pernaC3.position.set(-0.22, 0.225, 0.22);
+    cadeira.add(pernaC3);
+    const pernaC4 = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.45, 0.04), cadeiraMat);
+    pernaC4.position.set(0.22, 0.225, 0.22);
+    cadeira.add(pernaC4);
+    cadeira.position.set(0, 0, 0.6);
+    compGroup.add(cadeira);
+
+    scene.add(compGroup);
 
     // Pessoa (Lia)
     const person = new THREE.Group();
@@ -112,7 +226,7 @@ export function Pet3D({
     person.position.set(0, 0, 1);
     scene.add(person);
 
-    // Obstáculos para não atravessar: casa, árvores, pedras
+    // Obstáculos para não atravessar: casa, árvores, pedras, computador
     const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6b4a2a });
     const leafMat = new THREE.MeshStandardMaterial({ color: 0x2e7d32 });
     const treePositions: number[][] = [
@@ -169,6 +283,7 @@ export function Pet3D({
     house.position.set(-4, 0, -6);
     scene.add(house);
     obstacles.push({ x: -4, z: -6, r: 1.5 });
+    obstacles.push({ x: 2, z: -2, r: 1.2 }); // computador
 
     const flowerColors = [0xff6fa5, 0xffd21f, 0xffffff];
     for (let i = 0; i < 12; i++) {
@@ -205,8 +320,13 @@ export function Pet3D({
     let dragging = false;
     let lastX = 0;
     let lastY = 0;
+    let raf = 0;
 
     const chooseDestination = () => {
+      // Se estiver pesquisando, ir para o computador
+      if (pesquisando) {
+        return destinos.find((d) => d.nome === "computador") ?? destinos[0];
+      }
       // Decide baseado nas necessidades da vida
       const fome = life?.fome ?? 70;
       const energia = life?.energia ?? 80;
@@ -271,59 +391,86 @@ export function Pet3D({
     renderer.domElement.addEventListener("pointerup", onUp);
     renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
 
+    const quebrarTexto = (texto: string, ctx: CanvasRenderingContext2D, maxWidth: number): string[] => {
+      const palavras = texto.split(" ");
+      const linhas: string[] = [];
+      let linhaAtual = "";
+      for (const palavra of palavras) {
+        const teste = linhaAtual ? linhaAtual + " " + palavra : palavra;
+        if (ctx.measureText(teste).width > maxWidth) {
+          if (linhaAtual) linhas.push(linhaAtual);
+          linhaAtual = palavra;
+        } else {
+          linhaAtual = teste;
+        }
+      }
+      if (linhaAtual) linhas.push(linhaAtual);
+      return linhas;
+    };
+
     const animate = () => {
       raf = requestAnimationFrame(animate);
 
-      // Atualiza necessidade da vida a cada frame (usa o prop life se disponível)
-      if (life && waitTimer <= 0 && !isWalking) {
-        pickNext();
-      }
-
-      // Movimento em direção ao destino
-      if (isWalking && destinoAtual) {
+      // Se pesquisando e chegou no computador, para de andar
+      if (pesquisando && destinoAtual && destinoAtual.nome === "computador") {
         const dx = targetX - px;
         const dz = targetZ - pz;
         const dist = Math.sqrt(dx * dx + dz * dz);
-
-        if (dist > 0.25) {
-          // Não atravessar obstáculos: se muito perto, desvia ligeiramente
-          let avoidX = 0;
-          let avoidZ = 0;
-          for (const obs of obstacles) {
-            const odx = px - obs.x;
-            const odz = pz - obs.z;
-            const odist = Math.sqrt(odx * odx + odz * odz);
-            if (odist < obs.r + 1.2) {
-              avoidX += (odx / Math.max(odist, 0.01)) * 0.02;
-              avoidZ += (odz / Math.max(odist, 0.01)) * 0.02;
-            }
-          }
-
-          px += (dx / dist) * speed + avoidX;
-          pz += (dz / dist) * speed + avoidZ;
-
-          // Corpo virado para a direção do movimento
+        if (dist > 0.3) {
+          px += (dx / dist) * speed;
+          pz += (dz / dist) * speed;
           person.rotation.y = Math.atan2(dx, dz);
           walkCycle += 0.25;
           isWalking = true;
         } else {
-          // Chegou ao destino: espera um pouco
           isWalking = false;
+          person.rotation.y = Math.atan2(dx, dz);
+          walkCycle = 0;
+        }
+      } else if (!pesquisando) {
+        // Caminhada normal
+        if (isWalking && destinoAtual) {
+          const dx = targetX - px;
+          const dz = targetZ - pz;
+          const dist = Math.sqrt(dx * dx + dz * dz);
+
+          if (dist > 0.25) {
+            let avoidX = 0;
+            let avoidZ = 0;
+            for (const obs of obstacles) {
+              const odx = px - obs.x;
+              const odz = pz - obs.z;
+              const odist = Math.sqrt(odx * odx + odz * odz);
+              if (odist < obs.r + 1.2) {
+                avoidX += (odx / Math.max(odist, 0.01)) * 0.02;
+                avoidZ += (odz / Math.max(odist, 0.01)) * 0.02;
+              }
+            }
+
+            px += (dx / dist) * speed + avoidX;
+            pz += (dz / dist) * speed + avoidZ;
+
+            person.rotation.y = Math.atan2(dx, dz);
+            walkCycle += 0.25;
+            isWalking = true;
+          } else {
+            isWalking = false;
+            waitTimer += 0.016;
+            if (waitTimer > 3) {
+              pickNext();
+            }
+          }
+        } else {
           waitTimer += 0.016;
           if (waitTimer > 3) {
             pickNext();
           }
         }
-      } else {
-        waitTimer += 0.016;
-        if (waitTimer > 3) {
-          pickNext();
-        }
       }
 
       person.position.set(px, 0, pz);
 
-      // Animação de andar: pernas e braços balançando no ritmo do passo
+      // Animação de andar
       if (isWalking) {
         legL.rotation.x = Math.sin(walkCycle) * 0.6;
         legR.rotation.x = -Math.sin(walkCycle) * 0.6;
@@ -345,7 +492,6 @@ export function Pet3D({
       renderer.render(scene, camera);
     };
 
-    let raf = 0;
     animate();
 
     const handleResize = () => {
@@ -364,7 +510,7 @@ export function Pet3D({
       if (container.contains(renderer.domElement)) { container.removeChild(renderer.domElement); }
       renderer.dispose();
     };
-  }, [life]);
+  }, [life, pesquisando, temaPesquisa]);
 
   return <div ref={ref} style={{ width: "100%", height: "100%" }} />;
 }
