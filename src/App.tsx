@@ -421,7 +421,7 @@ export const App: React.FC = () => {
 
       {/* 3D World - Pet3D */}
       <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 0 }}>
-        <Pet3D onPetPositionChange={onPetPositionChangeRef.current} />
+        <Pet3D onPetPositionChange={onPetPositionChangeRef.current} life={life} />
       </div>
 
       {/* Chat panel - faixa só embaixo, sem cobrir a cena 3D */}
