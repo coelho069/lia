@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { FilaDeTemas, TEMAS_RESERVA, JANELA_TEMAS_RECENTES } from "./pesquisa-ciclo";
+import { FilaDeTemas, TEMAS_RESERVA } from "./pesquisa-ciclo";
 
 describe("FilaDeTemas", () => {
   beforeEach(() => {
@@ -16,21 +16,20 @@ describe("FilaDeTemas", () => {
     expect(segundo).not.toBe(primeiro);
   });
 
-  it("pula temas da janela dos últimos 20 (sessão e histórico salvo)", async () => {
+  it("pula temas que já estão em qualquer parte do histórico salvo", async () => {
     const historico = TEMAS_RESERVA.slice(0, 15);
     const fila = new FilaDeTemas(() => historico);
     const tema = await fila.proximo();
     expect(historico.map((t) => t.toLowerCase())).not.toContain(tema.toLowerCase());
   });
 
-  it("nunca repete nos últimos 20 temas registrados na sessão", async () => {
+  it("nunca repete um tema já escolhido na sessão, por mais longa que seja", async () => {
     const fila = new FilaDeTemas(() => []);
     const vistos: string[] = [];
     for (let i = 0; i < 25; i++) {
       const t = await fila.proximo();
       fila.registrar(t);
-      const ultimos = vistos.slice(-JANELA_TEMAS_RECENTES);
-      expect(ultimos.map((x) => x.toLowerCase())).not.toContain(t.toLowerCase());
+      expect(vistos.map((x) => x.toLowerCase())).not.toContain(t.toLowerCase());
       vistos.push(t);
     }
   });

@@ -31,6 +31,18 @@ async function getUserId(): Promise<string | null> {
   }
 }
 
+// Id e token da mesma sessão, para a leitura levar exatamente esse token.
+// Sem isso, se a sessão cair no meio, a consulta iria sem login e a RLS
+// devolveria lista vazia, igual a "linha ausente".
+async function sessaoParaLeitura(): Promise<{ userId: string; token: string } | null> {
+  try {
+    const { data } = await supabase.auth.getSession();
+    return data.session ? { userId: data.session.user.id, token: data.session.access_token } : null;
+  } catch {
+    return null;
+  }
+}
+
 /* ---------------- VIDA (um registro por usuário) ---------------- */
 
 type SessaoCache = { token: string; userId: string } | null;
@@ -44,6 +56,50 @@ export function registrarSessao(session: { access_token: string; user: { id: str
 // ID do usuário da sessão atual (para separar o cache local por conta)
 export function idUsuarioAtual(): string | null {
   return sessaoCache?.userId ?? null;
+}
+
+/* ---------------- Backup da sessão anônima (atalho por IP) ----------------
+   O storage interno do supabase-js é a fonte normal da sessão. Mas um usuário
+   anônimo (sem e-mail/senha) não tem como logar de novo se essa sessão sumir
+   (ex.: aba parada por muito tempo, refresh_token perdido do storage por uma
+   corrida ao acordar o aparelho): o atalho por IP (App.tsx) cria um usuário
+   anônimo NOVO, e todo o histórico antigo (pesquisas, grafo, vida, mensagens)
+   fica órfão, filtrado por user_id. Para dar uma segunda chance de recuperar a
+   MESMA sessão antes de criar um usuário novo, guardamos aqui uma cópia do
+   refresh_token, fora da chave usada pelo supabase-js. */
+const CHAVE_BACKUP_SESSAO_ANONIMA = "lia-backup-sessao-anonima";
+
+type BackupSessaoAnonima = { refreshToken: string; userId: string };
+
+// Guarda uma cópia do refresh_token só quando a sessão é anônima (atalho por
+// IP). Nunca lança: localStorage pode não existir ou estar bloqueado.
+export function salvarBackupSessaoAnonima(
+  session: { refresh_token?: string | null; user: { id: string; is_anonymous?: boolean } } | null
+): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    if (session?.user?.is_anonymous && session.refresh_token) {
+      const backup: BackupSessaoAnonima = { refreshToken: session.refresh_token, userId: session.user.id };
+      localStorage.setItem(CHAVE_BACKUP_SESSAO_ANONIMA, JSON.stringify(backup));
+    }
+  } catch {
+    // sem backup: segue sem ele (pior caso, igual a antes desta função existir)
+  }
+}
+
+// Lê o backup guardado por salvarBackupSessaoAnonima. Retorna null se não há
+// backup, se o storage não existe ou se o conteúdo salvo é inválido.
+export function lerBackupSessaoAnonima(): BackupSessaoAnonima | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const bruto = localStorage.getItem(CHAVE_BACKUP_SESSAO_ANONIMA);
+    if (!bruto) return null;
+    const dado = JSON.parse(bruto);
+    if (dado && typeof dado.refreshToken === "string" && typeof dado.userId === "string") return dado;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function linhaVida(life: LifeState, userId: string) {
@@ -60,9 +116,9 @@ function linhaVida(life: LifeState, userId: string) {
   };
 }
 
-export async function saveLifeToSupabase(life: LifeState): Promise<boolean> {
-  const userId = await getUserId();
-  if (!userId) return false;
+/** Grava a vida só se a sessão atual ainda for da conta `userId` (a conta de onde a vida foi lida). */
+export async function saveLifeToSupabase(life: LifeState, userId: string): Promise<boolean> {
+  if ((await getUserId()) !== userId) return false;
   const { error } = await supabase
     .from("vida")
     .upsert(linhaVida(life, userId), { onConflict: "user_id" });
@@ -74,9 +130,10 @@ export async function saveLifeToSupabase(life: LifeState): Promise<boolean> {
 }
 
 // Ao fechar/sair da página: envia a vida com keepalive (o navegador termina o envio)
-export function salvarVidaAoSair(life: LifeState): void {
+// Só envia se a sessão atual for da conta `userId` (a conta de onde a vida foi lida)
+export function salvarVidaAoSair(life: LifeState, userId: string): void {
   const s = sessaoCache;
-  if (!s) return;
+  if (!s || s.userId !== userId) return;
   const url = import.meta.env.VITE_SUPABASE_URL;
   const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
   void fetch(url + "/rest/v1/vida?on_conflict=user_id", {
@@ -92,26 +149,31 @@ export function salvarVidaAoSair(life: LifeState): void {
   }).catch(() => {});
 }
 
-/** Vida lida do banco. nasceuEm vem ISO ou null (null também se a coluna ainda não existe). */
-export type VidaLida = Partial<LifeState> & { nasceuEm?: string | null };
+/** Campos da vida que existem no banco. */
+export type VidaLida = Pick<LifeState, "fome" | "energia" | "humor" | "sociability" | "saude" | "xp" | "chapter">;
 
-/** Retorna null se não há registro ou se houve erro. */
-export async function loadLifeFromSupabase(): Promise<VidaLida | null> {
-  const userId = await getUserId();
-  if (!userId) return null;
-  // select('*') não falha se a coluna nasceu_em ainda não existir no banco
+/** Resultado da leitura: "ausente" = o banco confirmou que a conta não tem linha em `vida`. */
+export type LeituraVida =
+  | { estado: "ok"; userId: string; vida: VidaLida }
+  | { estado: "ausente"; userId: string }
+  | { estado: "sem-sessao" };
+
+/** Lança erro se a leitura falhar. Sem sessão e linha ausente são resultados diferentes. */
+export async function loadLifeFromSupabase(): Promise<LeituraVida> {
+  const sessao = await sessaoParaLeitura();
+  if (!sessao) return { estado: "sem-sessao" };
   const { data, error } = await supabase
     .from('vida')
     .select('*')
-    .eq('user_id', userId)
-    .maybeSingle();
+    .eq('user_id', sessao.userId)
+    .maybeSingle()
+    .setHeader('Authorization', 'Bearer ' + sessao.token);
   if (error) {
     console.error('[supabase] loadLife:', error.message);
     throw new Error('vida: ' + error.message);
   }
-  if (!data) return null;
-  const nasceu = (data as { nasceu_em?: string | null }).nasceu_em ?? null;
-  return {
+  if (!data) return { estado: "ausente", userId: sessao.userId };
+  const vida: VidaLida = {
     fome: data.fome,
     energia: data.energia,
     humor: data.humor,
@@ -119,32 +181,36 @@ export async function loadLifeFromSupabase(): Promise<VidaLida | null> {
     saude: data.saude,
     xp: data.xp,
     chapter: data.chapter,
-    nasceuEm: nasceu,
   };
+  if (data.user_id !== sessao.userId || !Object.values(vida).every((n) => Number.isFinite(n))) {
+    throw new Error('vida: linha inválida');
+  }
+  return { estado: "ok", userId: sessao.userId, vida };
 }
 
 /**
  * Data de criação da Lia (para o mostrador de dias).
- * Retorna null se não há registro, se a coluna nasceu_em ainda não existe
- * (SQL não rodado) ou se houve erro. Nunca lança.
+ * null = o banco confirmou que não há data (sem linha, nasceu_em vazio ou coluna inexistente).
+ * Lança erro se não há sessão ou se a leitura falhar.
  */
 export async function ultimaDataDeNascimento(): Promise<Date | null> {
-  try {
-    const userId = await getUserId();
-    if (!userId) return null;
-    const { data, error } = await supabase
-      .from('vida')
-      .select('nasceu_em')
-      .eq('user_id', userId)
-      .maybeSingle();
-    if (error || !data) return null;
-    const iso = (data as { nasceu_em?: string | null }).nasceu_em;
-    if (!iso) return null;
-    const d = new Date(iso);
-    return isNaN(d.getTime()) ? null : d;
-  } catch {
-    return null;
+  const sessao = await sessaoParaLeitura();
+  if (!sessao) throw new Error('vida (nascimento): sem sessão');
+  const { data, error } = await supabase
+    .from('vida')
+    .select('nasceu_em')
+    .eq('user_id', sessao.userId)
+    .maybeSingle()
+    .setHeader('Authorization', 'Bearer ' + sessao.token);
+  if (error) {
+    if (error.code === '42703') return null; // coluna ainda não criada (SQL não rodado)
+    throw new Error('vida (nascimento): ' + error.message);
   }
+  const iso = (data as { nasceu_em?: string | null } | null)?.nasceu_em;
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) throw new Error('vida (nascimento): data inválida');
+  return d;
 }
 
 /* ---------------- PESQUISAS (uma linha por pesquisa) ---------------- */
@@ -171,20 +237,47 @@ export async function saveResearchToSupabase(r: ResearchTopic, duracaoMs?: numbe
   }
 }
 
-/** Retorna null se houve erro. Lista vazia = banco realmente sem pesquisas. */
+// Limite de segurança para a leitura do histórico completo de pesquisas (usado para
+// nunca repetir um tema já pesquisado: ver pesquisa-ciclo.ts/pesquisa-fontes.ts).
+// 5000 é bem maior que o histórico real hoje (poucas centenas) e cobre anos de uso
+// no ritmo atual do ciclo; existe só para não deixar a página pedir linhas sem fim
+// se a tabela crescer muito. O PostgREST do Supabase limita cada página a 1000
+// linhas por padrão, por isso paginamos com .range() até esse limite.
+export const LIMITE_HISTORICO_PESQUISAS = 5000;
+const TAMANHO_PAGINA_PESQUISAS = 1000;
+
+/** Retorna null se houve erro. Lista vazia = banco realmente sem pesquisas.
+ *  Lê TODO o histórico (paginado até LIMITE_HISTORICO_PESQUISAS), para a fila de
+ *  temas nunca repetir um tema já pesquisado (não só os últimos 20). */
+type LinhaPesquisa = {
+  id: string;
+  tema: string;
+  aprendido: string;
+  fontes: unknown;
+  created_at: string;
+  site?: string | null;
+};
+
 export async function loadResearchesFromSupabase(): Promise<ResearchTopic[] | null> {
   const userId = await getUserId();
   if (!userId) return null;
-  const { data, error } = await supabase
-    .from('pesquisas')
-    .select('*')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false });
-  if (error) {
-    console.error('[supabase] loadResearches:', error.message);
-    throw new Error('pesquisas: ' + error.message);
+  const data: LinhaPesquisa[] = [];
+  for (let desde = 0; desde < LIMITE_HISTORICO_PESQUISAS; desde += TAMANHO_PAGINA_PESQUISAS) {
+    const ate = Math.min(desde + TAMANHO_PAGINA_PESQUISAS, LIMITE_HISTORICO_PESQUISAS) - 1;
+    const { data: pagina, error } = await supabase
+      .from('pesquisas')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .range(desde, ate);
+    if (error) {
+      console.error('[supabase] loadResearches:', error.message);
+      throw new Error('pesquisas: ' + error.message);
+    }
+    if (!pagina || pagina.length === 0) break;
+    data.push(...pagina);
+    if (pagina.length < ate - desde + 1) break; // última página
   }
-  if (!data) return null;
   return data.map((r) => ({
     id: r.id,
     topic: r.tema,
@@ -358,6 +451,68 @@ export async function carregarLicoesRelacionadas(tema: string, max = 3): Promise
     if (escolhidas.length >= max) break;
   }
   return escolhidas;
+}
+
+/* ---------------- POSIÇÕES (nós 'licao' expostos como posição da Lia) ----------------
+   Uma "posição" é a lição mais recente de um tema, no formato fixo escrito pelo
+   refletor (servidor/refletor.mjs): "APRENDIZADO: situação | fraqueza | lição | evidência". */
+export type Posicao = { tema: string; licaoTexto: string; evidencia: string; criadoEm: string };
+
+/** Extrai os 4 campos do label de um nó 'licao'. null se o formato não bater
+    (prefixo errado ou não são 4 campos não vazios) — tolerante, nunca quebra. */
+function parsearLicao(
+  label: string,
+): { situacao: string; fraqueza: string; licaoTexto: string; evidencia: string } | null {
+  const linha = label.trim();
+  if (!linha.startsWith('APRENDIZADO:')) return null;
+  const campos = linha.slice('APRENDIZADO:'.length).split('|').map((c) => c.trim());
+  if (campos.length !== 4 || campos.some((c) => !c)) return null;
+  const [situacao, fraqueza, licaoTexto, evidencia] = campos;
+  return { situacao, fraqueza, licaoTexto, evidencia };
+}
+
+/** Todas as posições da Lia (uma por tema, a mais recente quando há lições de temas
+    parecidos), ordenadas da mais recente para a mais antiga.
+    Retorna [] se não há sessão ou não há lições. Lança erro só se a leitura do banco falhar. */
+export async function listarPosicoes(): Promise<Posicao[]> {
+  const userId = await getUserId();
+  if (!userId) return [];
+  const { data: nos, error } = await supabase
+    .from('grafo_nos')
+    .select('label, pesquisa_id, created_at')
+    .eq('user_id', userId)
+    .eq('tipo', 'licao')
+    .order('created_at', { ascending: false })
+    .limit(200);
+  if (error) throw new Error('grafo_nos (posicoes): ' + error.message);
+  if (!nos?.length) return [];
+  const ids = [...new Set(nos.map((n) => n.pesquisa_id).filter((x): x is string => !!x))];
+  if (ids.length === 0) return [];
+  const { data: pesq, error: erroPesq } = await supabase.from('pesquisas').select('id, tema').in('id', ids);
+  if (erroPesq) throw new Error('pesquisas (posicoes): ' + erroPesq.message);
+  const temaDe = new Map((pesq ?? []).map((p) => [p.id, p.tema as string]));
+
+  // nos já vem do mais recente pro mais antigo: a primeira lição de cada tema (ou tema
+  // parecido) encontrada aqui já é a mais recente dele, então as próximas são descartadas.
+  const posicoes: Posicao[] = [];
+  for (const n of nos) {
+    const tema = n.pesquisa_id ? temaDe.get(n.pesquisa_id) : undefined;
+    if (!tema) continue;
+    const campos = parsearLicao(String(n.label));
+    if (!campos) continue;
+    if (posicoes.some((p) => temaParecido(tema, p.tema))) continue;
+    posicoes.push({ tema, licaoTexto: campos.licaoTexto, evidencia: campos.evidencia, criadoEm: String(n.created_at) });
+  }
+  return posicoes;
+}
+
+/** Posição cujo tema combina com `mensagem` (pelo mesmo critério de `temaParecido`),
+    para o chat reusar uma posição já formada em vez de pesquisar de novo.
+    null se `mensagem` for vazia ou nenhuma posição bater. */
+export async function encontrarPosicaoPorTexto(mensagem: string): Promise<Posicao | null> {
+  if (!mensagem.trim()) return null;
+  const posicoes = await listarPosicoes();
+  return posicoes.find((p) => temaParecido(mensagem, p.tema)) ?? null;
 }
 
 /* ---------------- CICLO (quem está pesquisando agora) ---------------- */

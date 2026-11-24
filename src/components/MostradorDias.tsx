@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { ultimaDataDeNascimento } from "../supabase-persistence";
 
 const MS_DIA = 86_400_000;
+const LIMITE_LEITURA_MS = 10_000; // leitura sem resposta conta como erro
+const ESPERAS_MS = [3_000, 6_000, 12_000, 24_000, 30_000, 30_000]; // espera antes de cada nova tentativa
 
 /** Dia 1 = dia da criação. Diferença de calendário no fuso local (Date.UTC evita erro de horário de verão). */
 function diaDaLia(nasceuEm: Date, agora: Date): number {
@@ -12,16 +14,33 @@ function diaDaLia(nasceuEm: Date, agora: Date): number {
 }
 
 export function MostradorDias() {
-  // undefined = ainda carregando; null = sem data registrada
+  // undefined = ainda não lido (carregando ou erro); null = o banco confirmou que não há data
   const [nasceuEm, setNasceuEm] = useState<Date | null | undefined>(undefined);
   const [agora, setAgora] = useState(() => new Date());
 
   useEffect(() => {
     let cancelado = false;
-    ultimaDataDeNascimento()
-      .then((d) => { if (!cancelado) setNasceuEm(d); })
-      .catch(() => { if (!cancelado) setNasceuEm(null); });
-    return () => { cancelado = true; };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tentar = (n: number) => {
+      let encerrada = false; // cada tentativa termina uma vez só: resposta, erro ou tempo esgotado
+      const falhou = () => {
+        if (cancelado || encerrada) return;
+        encerrada = true;
+        clearTimeout(timer);
+        if (n < ESPERAS_MS.length) timer = setTimeout(() => tentar(n + 1), ESPERAS_MS[n]);
+      };
+      timer = setTimeout(falhou, LIMITE_LEITURA_MS);
+      ultimaDataDeNascimento()
+        .then((d) => {
+          if (cancelado || encerrada) return;
+          encerrada = true;
+          clearTimeout(timer);
+          setNasceuEm(d);
+        })
+        .catch(falhou);
+    };
+    tentar(0);
+    return () => { cancelado = true; clearTimeout(timer); };
   }, []);
 
   useEffect(() => {

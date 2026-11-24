@@ -1,7 +1,11 @@
 // Ciclo contínuo de pesquisa da Lia na Wikipedia (pt).
-// Fila de temas, janela dos últimos 20 temas e busca de resumo.
-
-export const JANELA_TEMAS_RECENTES = 20;
+// Fila de temas: nunca repete um tema de TODO o histórico já pesquisado
+// (sessão atual + tudo que já foi salvo), igual ao currículo automático do
+// Voyager e às listas de ideias já usadas do IDEAgent. O histórico completo
+// (histórico()) já é lido do Supabase sem limite de janela (ver
+// loadResearchesFromSupabase em src/supabase-persistence.ts, paginado até
+// LIMITE_HISTORICO_PESQUISAS) e mantido em memória pelo App.tsx; por isso a
+// fila só precisa comparar contra o array recebido, sem reconsultar o banco.
 
 // Temas de reserva: usados só se o sorteio da Wikipedia falhar (ex.: sem internet).
 export const TEMAS_RESERVA = [
@@ -54,13 +58,16 @@ export async function buscarResumo(tema: string): Promise<ResultadoPesquisa> {
 }
 
 /**
- * Fila de temas. Nunca devolve um tema que esteja entre os últimos 20
- * (sessão atual + histórico já salvo). Quando a fila esvazia, sorteia
- * temas novos sozinha.
+ * Fila de temas. Nunca devolve um tema que já esteja em TODO o histórico
+ * (sessão atual + histórico já salvo, sem janela). Quando a fila esvazia,
+ * sorteia temas novos sozinha.
  */
 export class FilaDeTemas {
   private fila: string[] = [];
-  private recentes: string[] = []; // normalizados, mais recente primeiro
+  // Normalizados, escolhidos nesta sessão (inclusive antes de salvos no Supabase,
+  // por isso ficam fora de `historico()` até o salvamento terminar). Sem limite de
+  // tamanho: a sessão de uma aba não chega a ser um problema de memória.
+  private recentes = new Set<string>();
   private historico: () => string[];
 
   constructor(historico: () => string[]) {
@@ -69,14 +76,13 @@ export class FilaDeTemas {
 
   private jaPesquisado(tema: string): boolean {
     const n = normalizarTema(tema);
-    if (this.recentes.includes(n)) return true;
-    return this.historico().slice(0, JANELA_TEMAS_RECENTES).some((t) => normalizarTema(t) === n);
+    if (this.recentes.has(n)) return true;
+    return this.historico().some((t) => normalizarTema(t) === n);
   }
 
   // Marca um tema como pesquisado (ou tentado), para não repetir logo depois.
   registrar(tema: string): void {
-    const n = normalizarTema(tema);
-    this.recentes = [n, ...this.recentes.filter((t) => t !== n)].slice(0, JANELA_TEMAS_RECENTES);
+    this.recentes.add(normalizarTema(tema));
   }
 
   private async reabastecer(): Promise<void> {

@@ -103,6 +103,9 @@ export async function pesquisarSite(opcoes: {
         return { ...r, siteId: fonte.id, site: fonte.nome };
       }
       const itens = lerItensRss(await opcoes.buscarFeed(fonte));
+      // jaPesquisado cobre todo o histórico: se o feed (10 a 100 itens) já foi
+      // todo pesquisado, cai no catch abaixo e troca de fonte na mesma hora,
+      // sem esperar e sem reusar item antigo.
       const novo = itens.find((i) => !opcoes.jaPesquisado(i.titulo));
       if (!novo) throw new Error("nenhum item novo no feed");
       return { tema: novo.titulo, resumo: novo.resumo, link: novo.link, siteId: fonte.id, site: fonte.nome };
@@ -122,7 +125,10 @@ export async function pesquisarSite(opcoes: {
   return null;
 }
 
+// Compara contra TODO o histórico recebido (sem janela): historico já vem
+// completo do Supabase (loadResearchesFromSupabase, paginado até
+// LIMITE_HISTORICO_PESQUISAS em src/supabase-persistence.ts).
 export function jaFoiPesquisado(tema: string, historico: { topic: string }[]): boolean {
   const n = normalizarTema(tema);
-  return historico.slice(0, 20).some((p) => normalizarTema(p.topic) === n);
+  return historico.some((p) => normalizarTema(p.topic) === n);
 }

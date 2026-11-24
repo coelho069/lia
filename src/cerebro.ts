@@ -10,6 +10,7 @@ import {
   saveResearchToSupabase,
   saveGraphToSupabase,
   grafoDePesquisa,
+  encontrarPosicaoPorTexto,
   type GraphNode,
   type GraphEdge,
 } from "./supabase-persistence";
@@ -303,10 +304,21 @@ export async function perguntarModeloLocal(pergunta: string, ctx: ContextoAgente
     type: "function",
     function: { name: f.nome, description: f.descricao, parameters: f.parametros },
   }));
-  const mensagens: any[] = [
-    { role: "system", content: SISTEMA },
-    { role: "user", content: pergunta },
-  ];
+  const mensagens: any[] = [{ role: "system", content: SISTEMA }];
+  // Se o tema da pergunta bate com uma posição que a Lia já formou (reflexão do refletor),
+  // avisa o modelo nessa mesma rodada: sem chamada nova, só mais contexto no prompt.
+  try {
+    const posicao = await encontrarPosicaoPorTexto(pergunta);
+    if (posicao) {
+      mensagens.push({
+        role: "system",
+        content: `Você já tem uma posição formada sobre isso: você acha que ${posicao.licaoTexto} (evidência: ${posicao.evidencia}). Se fizer sentido para a pergunta, comece sua resposta com algo como "Você sabe que eu acho que ${posicao.licaoTexto}" antes do resto.`,
+      });
+    }
+  } catch {
+    // Sem posição salva ou Supabase indisponível: segue sem esse contexto extra.
+  }
+  mensagens.push({ role: "user", content: pergunta });
   const inicio = Date.now();
   try {
     for (let rodada = 0; rodada <= MAX_RODADAS; rodada++) {

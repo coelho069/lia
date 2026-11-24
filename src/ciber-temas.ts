@@ -40,9 +40,11 @@ export function ehTemaCiber(tema: string): boolean {
 
 /**
  * Sorteia um tema de cibersegurança para a próxima pesquisa, com probabilidade
- * PROBABILIDADE_CIBER. Nunca escolhe um tema que esteja entre os últimos 20
- * (jaPesquisado, mesmo critério do app). Se a lista estiver toda usada, devolve null
- * e o fluxo normal segue.
+ * PROBABILIDADE_CIBER. Nunca escolhe um tema que já esteja em todo o histórico
+ * (jaPesquisado é passado por quem chama; em pesquisa-fontes.ts/pesquisa-servico.mjs
+ * ele compara contra todo o histórico salvo, não só os últimos 20 — essa função só
+ * usa o que recebe, não tem janela própria). Se a lista estiver toda usada, devolve
+ * null e o fluxo normal segue.
  */
 export function sortearTemaCiber(
   jaPesquisado: (tema: string) => boolean,

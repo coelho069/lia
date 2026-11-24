@@ -4,6 +4,7 @@ import { FONTES } from './src/pesquisa-fontes'
 // @ts-ignore módulo JS do servidor, sem arquivo de tipos
 import { refletir } from './servidor/refletor.mjs'
 // @ts-ignore módulo JS do servidor, sem arquivo de tipos
+import { obterNoticiasIA } from './servidor/noticias-ia.mjs'
 
 // Ollama local da VPS. O navegador chama /api/lia-chat (mesma origem);
 // o servidor da Lia repassa só para o /api/chat do Ollama. Sem chave de API.
@@ -128,9 +129,34 @@ const refletorPlugin = {
   },
 }
 
+// Notícias de IA da Lia: GET /api/noticias-ia devolve as notícias lidas (cache de 1 hora)
+// e o comentário do dia da Lia (gerado uma vez por dia pelo hermes3:8b local).
+const rotaNoticiasIA = async (req: any, res: any) => {
+  if (req.method !== 'GET') {
+    res.setHeader('Allow', 'GET')
+    enviarJson(res, 405, { erro: 'use GET' })
+    return
+  }
+  try {
+    enviarJson(res, 200, await obterNoticiasIA({ fetchImpl: fetch }))
+  } catch (e: any) {
+    console.warn('[noticias-ia] rota falhou:', e?.message ?? e)
+    enviarJson(res, 500, { erro: 'falha ao ler notícias' })
+  }
+}
+const noticiasIaPlugin = {
+  name: 'lia-noticias-ia',
+  configureServer(server: any) {
+    server.middlewares.use('/api/noticias-ia', rotaNoticiasIA)
+  },
+  configurePreviewServer(server: any) {
+    server.middlewares.use('/api/noticias-ia', rotaNoticiasIA)
+  },
+}
+
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), feedsPlugin, refletorPlugin],
+  plugins: [react(), feedsPlugin, refletorPlugin, noticiasIaPlugin],
   server: { proxy: ollamaProxy },
   // Domínios públicos da Lia (atrás do Nginx). Sem isso o Vite recusa o Host do domínio.
   preview: { proxy: ollamaProxy, allowedHosts: ['liaonline.blog.br', 'www.liaonline.blog.br', 'lia.nexoralabs.dev.br'] },

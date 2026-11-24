@@ -13,14 +13,16 @@ import { carregarAnotacoes, type Anotacao } from "./anotacoes";
 import {
   tickLife,
   decideNextAction,
-  loadLife,
-  saveLife,
+  createInitialLife,
   type LifeState,
 } from "./life";
+import { lerExtrasVida, gravarExtrasVida, lerMinutosJogo, gravarMinutosJogo, MINUTOS_INICIAIS } from "./vida-local";
 import {
   registrarSessao,
   idUsuarioAtual,
   salvarVidaAoSair,
+  salvarBackupSessaoAnonima,
+  lerBackupSessaoAnonima,
   saveLifeToSupabase,
   loadLifeFromSupabase,
   saveResearchToSupabase,
@@ -41,6 +43,9 @@ import type { ResearchTopic } from "./types";
 
 const Pet3D = lazy(() => import("./components/Pet3D").then((m) => ({ default: m.Pet3D })));
 const AbaEvolucao = lazy(() => import("./components/AbaEvolucao").then((m) => ({ default: m.AbaEvolucao })));
+const NoticiasIA = lazy(() => import("./components/NoticiasIA").then((m) => ({ default: m.NoticiasIA })));
+const LinhaDoTempo = lazy(() => import("./components/LinhaDoTempo").then((m) => ({ default: m.LinhaDoTempo })));
+const Posicoes = lazy(() => import("./components/Posicoes").then((m) => ({ default: m.Posicoes })));
 
 /* ---------------- Ritmo da pesquisa e da vida (ms) ---------------- */
 const PAUSA_MIN_MS = 30000; // pausa curta entre uma pesquisa e outra: de 30 s a 1 min
@@ -53,11 +58,26 @@ const DECISAO_MS = 20000; // a Lia decide o que fazer a cada 20 s
 const MINUTO_JOGO_MS = 60000; // a hora do jogo avança um minuto a cada minuto real
 const SALVAR_VIDA_MS = 30000;
 const LIMITE_CARGA_MS = 5000; // tempo máximo esperando o Supabase antes de mostrar a tela
+// Leitura da vida: tempo limite de cada tentativa e espera antes da próxima (o último valor se repete)
+const LIMITES_VIDA_MS = [LIMITE_CARGA_MS, 10000, 20000, 30000];
+const ESPERAS_VIDA_MS = [2000, 4000, 8000, 16000, 30000];
 
 const CHAVE_CACHE_PESQUISAS = (uid: string | null) => "lia-pesquisas:" + (uid ?? "sem-usuario");
 
 type Msg = { id: string; from: string; text: string; createdAt: number };
-type Aba = "Cena" | "Pesquisas" | "Grafico" | "Evolucao";
+type Aba = "Cena" | "Pesquisas" | "Grafico" | "Evolucao" | "Noticias" | "Posicoes" | "LinhaDoTempo";
+
+// Barra de abas fixa na base da tela, só no celular (telaEstreita): ícone + rótulo curto, as 7 abas com acesso direto
+const ALTURA_ABAS_MOBILE = 58; // altura da barra, sem contar a folga da área segura do celular (notch/home indicator)
+const ABAS_MOBILE: { aba: Aba; rotulo: string; icone: string }[] = [
+  { aba: "Cena", rotulo: "Cena", icone: "🏠" },
+  { aba: "Pesquisas", rotulo: "Pesquisas", icone: "🔎" },
+  { aba: "Grafico", rotulo: "Gráfico", icone: "📊" },
+  { aba: "Evolucao", rotulo: "Evolução", icone: "🌱" },
+  { aba: "Noticias", rotulo: "Notícias", icone: "📰" },
+  { aba: "Posicoes", rotulo: "Posições", icone: "🧭" },
+  { aba: "LinhaDoTempo", rotulo: "Tempo", icone: "🕒" },
+];
 
 const novaMsg = (from: string, text: string): Msg => ({ id: safeId(), from, text, createdAt: Date.now() });
 
@@ -198,14 +218,20 @@ export default function App() {
   const [dadosProntos, setDadosProntos] = useState(false);
   const [erroCarga, setErroCarga] = useState<string | null>(null);
   const [tentativaCarga, setTentativaCarga] = useState(0);
+  const [erroVida, setErroVida] = useState<string | null>(null);
+  const [uidSessao, setUidSessao] = useState<string | null>(null); // só para recarregar se a conta mudar
+  const vidaLidaRef = useRef<string | null>(null); // conta cuja vida foi lida do banco nesta carga: só ela pode ser gravada
+  const vidaNaTelaRef = useRef<string | null>(null); // conta dona da vida e da hora que estão na tela
 
   // Tela e vida
   const [tab, setTab] = useState<Aba>("Cena");
-  const [life, setLife] = useState<LifeState>(() => loadLife());
+  const [life, setLife] = useState<LifeState>(() => createInitialLife()); // provisória: a tela só abre com a vida do banco
   const vidaRef = useRef(life);
   vidaRef.current = life;
   const [acaoTexto, setAcaoTexto] = useState("");
-  const [minutosJogo, setMinutosJogo] = useState(8 * 60); // 08:00
+  const [minutosJogo, setMinutosJogo] = useState(MINUTOS_INICIAIS);
+  const minutosRef = useRef(minutosJogo);
+  minutosRef.current = minutosJogo;
 
   // Chat
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -256,7 +282,15 @@ export default function App() {
     window.dispatchEvent(new Event("resize"));
   }, [chatLateral]);
   const recuoPainel = chatLateral ? LARGURA_CHAT + 32 : 16; // área à esquerda do chat (desktop)
-  const baseAbas: number | string = telaEstreita && chatAberto ? "calc(45vh + 16px)" : 16;
+  // No celular, a barra de abas fica fixa na base da tela: o que normalmente ficaria no rodapé
+  // (chat, botão "Abrir chat", painéis de conteúdo) precisa subir essa altura para não ficar embaixo dela.
+  const recuoAbasMobile = `calc(${ALTURA_ABAS_MOBILE}px + env(safe-area-inset-bottom, 0px))`;
+  const baseAbas: string = telaEstreita
+    ? chatAberto
+      ? `calc(45vh + ${ALTURA_ABAS_MOBILE}px + env(safe-area-inset-bottom, 0px) + 24px)`
+      : `calc(${recuoAbasMobile} + 8px)`
+    : "16px";
+  const topoConteudo = telaEstreita ? 56 : 110; // sem a fileira de abas no topo, o celular ganha espaço vertical
 
   /* ---- Sessão: Supabase Auth, com atalho por IP (anônimo) ---- */
   useEffect(() => {
@@ -265,14 +299,39 @@ export default function App() {
       if (vivo) setSessaoVerificada(true); // Supabase demorou: mostra a tela de login mesmo assim
     }, LIMITE_CARGA_MS);
 
+    // Tenta recuperar a MESMA sessão anônima a partir do refresh_token guardado em
+    // backup (ver supabase-persistence.ts), em vez de criar um usuário anônimo novo
+    // (que fica órfão de todo o histórico salvo sob o user_id antigo). Usada quando
+    // o storage interno do supabase-js perdeu a sessão sem o refresh_token em si
+    // estar morto (ex.: aba parada muito tempo, corrida ao acordar o aparelho).
+    async function tentarRecuperarSessaoAnonima(): Promise<boolean> {
+      const backup = lerBackupSessaoAnonima();
+      if (!backup) return false;
+      try {
+        const { data: recuperada, error } = await comLimite(
+          supabase.auth.refreshSession({ refresh_token: backup.refreshToken })
+        );
+        if (vivo && !error && recuperada?.session) {
+          registrarSessao(recuperada.session);
+          salvarBackupSessaoAnonima(recuperada.session);
+          setLoggedIn(true);
+          return true;
+        }
+      } catch {
+        // backup também não recuperou: quem chamou segue para o próximo passo
+      }
+      return false;
+    }
+
     (async () => {
       try {
         const { data } = await comLimite(supabase.auth.getSession());
         if (!vivo) return;
         if (data.session) {
           registrarSessao(data.session);
+          salvarBackupSessaoAnonima(data.session);
           setLoggedIn(true);
-        } else {
+        } else if (!(await tentarRecuperarSessaoAnonima())) {
           const ipPermitido = import.meta.env.VITE_ALLOWED_IP;
           if (ipPermitido) {
             try {
@@ -283,6 +342,7 @@ export default function App() {
                 const { data: anon, error } = await supabase.auth.signInAnonymously();
                 if (vivo && !error && anon?.session) {
                   registrarSessao(anon.session);
+                  salvarBackupSessaoAnonima(anon.session);
                   setLoggedIn(true);
                 }
               }
@@ -301,8 +361,17 @@ export default function App() {
 
     const { data: ouvinte } = supabase.auth.onAuthStateChange((evento, session) => {
       registrarSessao(session ?? null);
-      if (session) setLoggedIn(true);
-      else if (evento === "SIGNED_OUT") setLoggedIn(false);
+      if (session) {
+        salvarBackupSessaoAnonima(session);
+        setLoggedIn(true);
+      } else if (evento === "SIGNED_OUT") {
+        // Sessão anônima perdida com a aba ainda aberta (ex.: refresh_token expirou
+        // parado): tenta recuperar pelo backup antes de deixar o usuário do atalho
+        // por IP preso numa tela de login que ele não tem e-mail/senha para preencher.
+        void tentarRecuperarSessaoAnonima().then((recuperou) => {
+          if (vivo && !recuperou) setLoggedIn(false);
+        });
+      }
     });
 
     return () => {
@@ -315,42 +384,90 @@ export default function App() {
   // Envio de eventos (diário) em segundo plano
   useEffect(() => iniciarEnvioEventos(), []);
 
-  // Salvar a vida ao sair da página
+  // Acompanha a conta da sessão: se mudar com a página aberta, a carga roda de novo
   useEffect(() => {
-    const aoSair = () => salvarVidaAoSair(vidaRef.current);
+    const { data: ouvinte } = supabase.auth.onAuthStateChange((_evento, session) => setUidSessao(session?.user.id ?? null));
+    return () => ouvinte.subscription.unsubscribe();
+  }, []);
+
+  // Conta que pode gravar a vida agora: a vida dela foi lida do banco e a sessão ainda é dela
+  function contaParaGravarVida(): string | null {
+    const uid = vidaLidaRef.current;
+    return uid && uid === idUsuarioAtual() ? uid : null;
+  }
+
+  // Salvar a vida e a hora do jogo ao sair da página
+  useEffect(() => {
+    const aoSair = () => {
+      const uid = contaParaGravarVida();
+      if (uid) salvarVidaAoSair(vidaRef.current, uid);
+      const uidTela = vidaNaTelaRef.current;
+      if (uidTela) gravarMinutosJogo(uidTela, minutosRef.current);
+    };
     window.addEventListener("pagehide", aoSair);
     return () => window.removeEventListener("pagehide", aoSair);
   }, []);
 
   /* ---- Carga dos dados do Supabase ao entrar ---- */
   useEffect(() => {
-    if (!loggedIn) {
+    // Carga nova, saída ou troca de conta: nada de vida é gravado até ler do banco de novo
+    vidaLidaRef.current = null;
+    setErroVida(null);
+    if (!loggedIn || vidaNaTelaRef.current !== idUsuarioAtual()) {
+      vidaNaTelaRef.current = null;
       setDadosProntos(false);
-      return;
     }
+    if (!loggedIn) return;
     let vivo = true;
+    let timerVida: ReturnType<typeof setTimeout> | undefined;
     setErroCarga(null);
+
+    // Lê a vida até conseguir. Erro, tempo esgotado e falta de sessão não são "sem dados": tenta de novo
+    async function carregarVida(): Promise<void> {
+      for (let n = 0; vivo; n++) {
+        try {
+          const lida = await comLimite(loadLifeFromSupabase(), LIMITES_VIDA_MS[Math.min(n, LIMITES_VIDA_MS.length - 1)]);
+          if (!vivo) return; // resposta de carga antiga
+          if (lida.estado === "sem-sessao" || lida.userId !== idUsuarioAtual()) throw new Error("sem sessão do Supabase");
+          const uid = lida.userId;
+          // Recarga da mesma conta: a vida da tela é mais nova que a do banco, então fica a da tela
+          if (vidaNaTelaRef.current !== uid) {
+            const nova: LifeState = { ...createInitialLife(), ...lerExtrasVida(uid), ...(lida.estado === "ok" ? lida.vida : {}) };
+            const minutos = lerMinutosJogo(uid);
+            vidaRef.current = nova;
+            setLife(nova);
+            minutosRef.current = minutos;
+            setMinutosJogo(minutos);
+            vidaNaTelaRef.current = uid;
+          }
+          vidaLidaRef.current = uid;
+          setErroVida(null);
+          return;
+        } catch (e) {
+          if (!vivo) return;
+          setErroVida(e instanceof Error ? e.message : String(e));
+          await new Promise<void>((res) => {
+            timerVida = setTimeout(res, ESPERAS_VIDA_MS[Math.min(n, ESPERAS_VIDA_MS.length - 1)]);
+          });
+        }
+      }
+    }
+
     (async () => {
+      const vidaCarregada = carregarVida();
       // Cache da conta primeiro, para não mostrar a aba vazia enquanto o Supabase responde
       const cache = ordenarUnicas(lerCachePesquisas());
       if (cache.length) {
         pesquisasRef.current = cache;
         setPesquisas(cache);
       }
-      const [vidaDb, pesqDb, msgDb, notas] = await Promise.allSettled([
-        comLimite(loadLifeFromSupabase()),
+      const [pesqDb, msgDb, notas] = await Promise.allSettled([
         comLimite(loadResearchesFromSupabase()),
         comLimite(loadMessagesFromSupabase()),
         comLimite(carregarAnotacoes()),
       ]);
       if (!vivo) return;
 
-      if (vidaDb.status === "fulfilled" && vidaDb.value) {
-        const merged = { ...vidaRef.current, ...vidaDb.value } as LifeState;
-        vidaRef.current = merged;
-        setLife(merged);
-        saveLife(merged);
-      }
       if (pesqDb.status === "fulfilled" && pesqDb.value) {
         const lista = ordenarUnicas(pesqDb.value);
         pesquisasRef.current = lista;
@@ -370,12 +487,19 @@ export default function App() {
       } else {
         setErroAnotacoes(notas.reason instanceof Error ? notas.reason.message : String(notas.reason));
       }
-      setDadosProntos(true);
+      await vidaCarregada; // a tela só abre com a vida lida do banco
+      if (vivo) setDadosProntos(true);
     })();
     return () => {
       vivo = false;
+      clearTimeout(timerVida);
     };
-  }, [loggedIn, tentativaCarga]);
+  }, [loggedIn, uidSessao, tentativaCarga]);
+
+  // Guarda a hora do jogo desta conta, para o F5 voltar na mesma hora
+  useEffect(() => {
+    if (dadosProntos && vidaNaTelaRef.current) gravarMinutosJogo(vidaNaTelaRef.current, minutosJogo);
+  }, [dadosProntos, minutosJogo]);
 
   /* ---- Vida: decai, decide ações e avança a hora ---- */
   useEffect(() => {
@@ -401,8 +525,10 @@ export default function App() {
       registrarEvento("decisao", actionText, { acao: action });
     }, DECISAO_MS);
     const salvar = setInterval(() => {
-      saveLife(vidaRef.current);
-      void saveLifeToSupabase(vidaRef.current);
+      const uid = contaParaGravarVida();
+      if (!uid) return; // vida não confirmada no banco: não grava por cima
+      gravarExtrasVida(uid, vidaRef.current);
+      void saveLifeToSupabase(vidaRef.current, uid);
     }, SALVAR_VIDA_MS);
     return () => {
       clearInterval(tick);
@@ -738,8 +864,20 @@ export default function App() {
   if (!loggedIn) {
     return <LoginScreen onLogin={() => { setSessaoVerificada(true); setLoggedIn(true); }} />;
   }
-  if (!dadosProntos && !erroCarga) {
-    return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#87ceeb" }}>Carregando a Lia...</div>;
+  if (!dadosProntos) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", gap: 12, alignItems: "center", justifyContent: "center", background: "#87ceeb" }}>
+        <div>Carregando a Lia...</div>
+        {erroVida && (
+          <div role="alert" style={{ background: "#fee2e2", color: "#7f1d1d", padding: 10, borderRadius: 6, fontSize: 13, maxWidth: "calc(100vw - 32px)", boxSizing: "border-box", textAlign: "center" }}>
+            Não consegui ler a vida da Lia. Tentando de novo sozinha.
+            <button type="button" onClick={() => setTentativaCarga((n) => n + 1)} style={{ marginLeft: 10, padding: "4px 10px", background: "#7c3aed", color: "white", border: "none", borderRadius: 4, cursor: "pointer" }}>
+              Tentar de novo
+            </button>
+          </div>
+        )}
+      </div>
+    );
   }
 
   const horas = String(Math.floor(minutosJogo / 60)).padStart(2, "0");
@@ -788,46 +926,84 @@ export default function App() {
         <div style={{ fontWeight: "bold", fontSize: 22, color: "#1a1a2e" }}>Lia</div>
         <button type="button" onClick={sair} style={{ background: "none", border: "none", color: "#e94560", cursor: "pointer", fontSize: 13 }}>Sair</button>
       </div>
-      <div style={{ position: "absolute", top: 60, left: 16, zIndex: 20, display: "flex", gap: 8, flexWrap: "wrap" }}>
-        {botaoAba("Cena", "Cena")}
-        {botaoAba("Pesquisas", "Pesquisas")}
-        {botaoAba("Grafico", "Grafico")}
-        {botaoAba("Evolucao", "Evolução")}
-      </div>
-
-      {/* Vida da Lia (só na cena) */}
-      {tab === "Cena" && (
-        <div style={{ position: "absolute", top: 110, left: 16, zIndex: 20, width: 240, display: "flex", flexDirection: "column", gap: 10 }}>
-        <div style={{ padding: 12, background: "rgba(255,255,255,0.88)", borderRadius: 8, boxShadow: "0 2px 10px rgba(0,0,0,0.15)", fontSize: 13 }}>
-          <div style={{ fontWeight: "bold", fontSize: 17, marginBottom: 6 }}>Vida da Lia</div>
-          <div>Hora: {horas}:{minutos} {dia}</div>
-          <div style={{ marginTop: 6, lineHeight: 1.5 }}>
-            Fome: {Math.round(life.fome)}<br />
-            Energia: {Math.round(life.energia)}<br />
-            Humor: {Math.round(life.humor)}<br />
-            Social: {Math.round(life.sociability)}<br />
-            Saúde: {Math.round(life.saude)}<br />
-            XP: {Math.round(life.xp)} (Capítulo {life.chapter})
-          </div>
-          {acaoTexto && <div style={{ marginTop: 8, fontStyle: "italic", color: "#444" }}>{acaoTexto}</div>}
-          <div style={{ marginTop: 8 }}>
-            <b>Pesquisando:</b>
-            <div style={{ color: "#444" }}>{estadoPesquisa?.status ?? "—"}</div>
-          </div>
-        </div>
+      {/* Abas: no desktop, fileira no topo-esquerda, como antes. No celular, a barra fixa na base cuida da navegação (mais abaixo). */}
+      {!telaEstreita && (
+        <div style={{ position: "absolute", top: 60, left: 16, zIndex: 20, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {botaoAba("Cena", "Cena")}
+          {botaoAba("Pesquisas", "Pesquisas")}
+          {botaoAba("Grafico", "Grafico")}
+          {botaoAba("Evolucao", "Evolução")}
+          {botaoAba("Noticias", "Notícias")}
+          {botaoAba("Posicoes", "Posições")}
+          {botaoAba("LinhaDoTempo", "Linha do tempo")}
         </div>
       )}
 
-      {/* Pesquisas da Lia: no canto direito, embaixo dos botões da câmera; o clique abre o popup no centro */}
-      {tab === "Cena" && (
-        <div style={{ position: "absolute", top: 52, right: recuoPainel, zIndex: 20 }}>
+      {/* Vida da Lia + Pesquisas recentes: sempre visíveis na aba Cena (nada escondido atrás de toque).
+          No desktop, cada painel fica no seu canto, como antes. No celular, ficam empilhados numa única
+          coluna à esquerda: lado a lado (240px + 320px) não cabe numa tela de 360-430px sem se sobrepor. */}
+      {tab === "Cena" && (() => {
+        const painelVida = (
+          <div style={{ width: 240, padding: 12, background: "rgba(255,255,255,0.88)", borderRadius: 8, boxShadow: "0 2px 10px rgba(0,0,0,0.15)", fontSize: 13 }}>
+            <div style={{ fontWeight: "bold", fontSize: 17, marginBottom: 6 }}>Vida da Lia</div>
+            <div>Hora: {horas}:{minutos} {dia}</div>
+            <div style={{ marginTop: 6, lineHeight: 1.5 }}>
+              Fome: {Math.round(life.fome)}<br />
+              Energia: {Math.round(life.energia)}<br />
+              Humor: {Math.round(life.humor)}<br />
+              Social: {Math.round(life.sociability)}<br />
+              Saúde: {Math.round(life.saude)}<br />
+              XP: {Math.round(life.xp)} (Capítulo {life.chapter})
+            </div>
+            {acaoTexto && <div style={{ marginTop: 8, fontStyle: "italic", color: "#444" }}>{acaoTexto}</div>}
+            <div style={{ marginTop: 8 }}>
+              <b>Pesquisando:</b>
+              <div style={{ color: "#444" }}>{estadoPesquisa?.status ?? "—"}</div>
+            </div>
+          </div>
+        );
+        const painelPesquisas = (
           <PainelPesquisas
             gatilho={pesquisas.length}
             pesquisando={estadoPesquisa?.tema ?? ""}
             onAbrir={(id) => setPopupPesquisaId(id)}
           />
-        </div>
-      )}
+        );
+        if (telaEstreita) {
+          // Empilhados numa coluna com rolagem própria: se a lista crescer, rola dentro dela
+          // em vez de cobrir a barra de abas ou vazar da tela.
+          return (
+            <div
+              style={{
+                position: "absolute",
+                top: 60,
+                left: 8,
+                zIndex: 20,
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+                maxHeight: chatAberto ? "38vh" : "60vh",
+                overflowY: "auto",
+              }}
+            >
+              {painelVida}
+              {painelPesquisas}
+            </div>
+          );
+        }
+        return (
+          <>
+            <div style={{ position: "absolute", top: 110, left: 16, zIndex: 20 }}>{painelVida}</div>
+            {/* top:110 (igual ao painel Vida da Lia), não mais top:52: com 7 abas (antes eram 4) a fileira de
+                abas do topo-esquerda (top:60, uma linha só, sem largura máxima) passou a esticar bem mais para
+                a direita e sobrepunha este painel em larguras de laptop comuns (1024-1366px, chat aberto ou
+                fechado). A fileira de abas ocupa só até ~top:92; top:110 fica sempre livre dela, em qualquer
+                largura de tela, sem precisar limitar a largura da fileira (o que a faria quebrar linha e
+                sobrepor o painel "Vida da Lia" abaixo dela, que começa em top:110). */}
+            <div style={{ position: "absolute", top: 110, right: recuoPainel, zIndex: 20 }}>{painelPesquisas}</div>
+          </>
+        );
+      })()}
 
       {/* Mostrador de dias e hora: canto superior direito, uma linha; não cobre abas (top 60 à esquerda) nem o chat (top 110) */}
       {/* Mostrador de dias: ao lado (à esquerda) dos botões da câmera, que ficam no canto direito da cena */}
@@ -837,27 +1013,42 @@ export default function App() {
 
       {/* Avisos */}
       {erroSalvar && (
-        <div role="alert" style={{ position: "absolute", top: 8, right: 8, zIndex: 30, background: "#fee2e2", color: "#7f1d1d", padding: "6px 10px", borderRadius: 6, fontSize: 12, maxWidth: 360 }}>
+        <div role="alert" style={{ position: "absolute", top: 8, right: 8, zIndex: 30, background: "#fee2e2", color: "#7f1d1d", padding: "6px 10px", borderRadius: 6, fontSize: 12, maxWidth: "min(360px, calc(100vw - 16px))", boxSizing: "border-box" }}>
           {erroSalvar}
         </div>
       )}
-      {erroCarga && (
-        <div role="alert" style={{ position: "absolute", top: 8, right: 8, zIndex: 30, background: "#fee2e2", color: "#7f1d1d", padding: 10, borderRadius: 6, fontSize: 13 }}>
-          Não consegui ler do Supabase: {erroCarga}.
+      {(erroCarga || erroVida) && (
+        <div role="alert" style={{ position: "absolute", top: 8, right: 8, zIndex: 30, background: "#fee2e2", color: "#7f1d1d", padding: 10, borderRadius: 6, fontSize: 13, maxWidth: "calc(100vw - 16px)", boxSizing: "border-box" }}>
+          Não consegui ler do Supabase: {erroCarga ?? "Vida: " + erroVida + " (a vida não é gravada até ler)"}.
           <button type="button" onClick={() => setTentativaCarga((n) => n + 1)} style={{ marginLeft: 10, padding: "4px 10px", background: "#7c3aed", color: "white", border: "none", borderRadius: 4, cursor: "pointer" }}>
             Tentar de novo
           </button>
         </div>
       )}
       {erroAnotacoes && (
-        <div role="alert" style={{ position: "absolute", top: 8, left: 220, zIndex: 20, background: "#fee2e2", color: "#7f1d1d", padding: "6px 10px", borderRadius: 6, fontSize: 12 }}>
+        <div
+          role="alert"
+          style={{
+            position: "absolute",
+            top: 8,
+            left: telaEstreita ? 70 : 220,
+            zIndex: 20,
+            background: "#fee2e2",
+            color: "#7f1d1d",
+            padding: "6px 10px",
+            borderRadius: 6,
+            fontSize: 12,
+            maxWidth: telaEstreita ? "calc(100vw - 86px)" : "calc(100vw - 236px)",
+            boxSizing: "border-box",
+          }}
+        >
           Anotações não carregaram: {erroAnotacoes}
         </div>
       )}
 
       {/* Aba Pesquisas */}
       {tab === "Pesquisas" && (
-        <div style={{ position: "absolute", top: 110, left: 16, right: recuoPainel, bottom: baseAbas, zIndex: 10, overflow: "auto", background: "#fafaf7", borderRadius: 12, padding: 16, boxShadow: "0 4px 16px rgba(0,0,0,0.15)" }}>
+        <div style={{ position: "absolute", top: topoConteudo, left: 16, right: recuoPainel, bottom: baseAbas, zIndex: 10, overflow: "auto", background: "#fafaf7", borderRadius: 12, padding: 16, boxShadow: "0 4px 16px rgba(0,0,0,0.15)" }}>
           <h2 style={{ margin: "0 0 6px", fontSize: 20, color: "#1a1a2e" }}>Pesquisas da Lia na internet</h2>
           <div style={{ fontSize: 13, marginBottom: 12 }}>
             <b>Pesquisando:</b> {estadoPesquisa?.status ?? "—"}
@@ -917,32 +1108,72 @@ export default function App() {
 
       {/* Aba Grafico */}
       {tab === "Grafico" && (
-        <div style={{ position: "absolute", top: 110, left: 16, right: recuoPainel, bottom: baseAbas, zIndex: 10, overflow: "auto", background: "#fafaf7", borderRadius: 12, padding: 12 }}>
+        <div style={{ position: "absolute", top: topoConteudo, left: 16, right: recuoPainel, bottom: baseAbas, zIndex: 10, overflow: "auto", background: "#fafaf7", borderRadius: 12, padding: 12 }}>
           <LiaGraph pesquisas={pesquisas} onAbrirPesquisa={(id: string) => setPopupPesquisaId(id)} />
         </div>
       )}
 
       {/* Aba Evolução */}
       {tab === "Evolucao" && (
-        <div style={{ position: "absolute", top: 110, left: 16, right: recuoPainel, bottom: baseAbas, zIndex: 10, overflow: "auto", background: "#fafaf7", borderRadius: 12, padding: 16 }}>
+        <div style={{ position: "absolute", top: topoConteudo, left: 16, right: recuoPainel, bottom: baseAbas, zIndex: 10, overflow: "auto", background: "#fafaf7", borderRadius: 12, padding: 16 }}>
           <Suspense fallback={null}>
             <AbaEvolucao onAbrirPesquisa={(id: string) => setPopupPesquisaId(id)} />
           </Suspense>
         </div>
       )}
 
-      {/* Botão para abrir o chat, quando recolhido */}
+      {/* Aba Notícias de IA e comentário da Lia (só leitura da rota /api/noticias-ia) */}
+      {tab === "Noticias" && (
+        <div style={{ position: "absolute", top: topoConteudo, left: 16, right: recuoPainel, bottom: baseAbas, zIndex: 10, overflow: "auto", overflowX: "hidden", background: "#fafaf7", borderRadius: 12, padding: 16, boxSizing: "border-box" }}>
+          <Suspense fallback={null}>
+            <NoticiasIA />
+          </Suspense>
+        </div>
+      )}
+
+      {/* Aba Posições: as posições que a Lia formou a partir das lições (só leitura) */}
+      {tab === "Posicoes" && (
+        <div style={{ position: "absolute", top: topoConteudo, left: 16, right: recuoPainel, bottom: baseAbas, zIndex: 10, overflow: "auto", overflowX: "hidden", background: "#fafaf7", borderRadius: 12, padding: 16, boxSizing: "border-box" }}>
+          <Suspense fallback={null}>
+            <Posicoes />
+          </Suspense>
+        </div>
+      )}
+
+      {/* Aba Linha do tempo: o que aconteceu desde a última visita (só leitura; não grava no banco) */}
+      {tab === "LinhaDoTempo" && (
+        <div style={{ position: "absolute", top: topoConteudo, left: 16, right: recuoPainel, bottom: baseAbas, zIndex: 10, overflow: "auto", overflowX: "hidden", background: "#fafaf7", borderRadius: 12, padding: 16, boxSizing: "border-box" }}>
+          <Suspense fallback={null}>
+            <LinhaDoTempo />
+          </Suspense>
+        </div>
+      )}
+
+      {/* Botão para abrir o chat, quando recolhido. No celular, fica acima da barra de abas fixa na base. */}
       {!chatAberto && (
         <button
           type="button"
           onClick={() => setChatAberto(true)}
-          style={{ position: "absolute", right: 16, bottom: 16, zIndex: 16, padding: "10px 16px", borderRadius: 8, border: "none", background: "#7c3aed", color: "white", fontWeight: "bold", cursor: "pointer", boxShadow: "0 2px 10px rgba(0,0,0,0.25)" }}
+          style={{
+            position: "absolute",
+            right: 16,
+            zIndex: 16,
+            padding: "10px 16px",
+            borderRadius: 8,
+            border: "none",
+            background: "#7c3aed",
+            color: "white",
+            fontWeight: "bold",
+            cursor: "pointer",
+            boxShadow: "0 2px 10px rgba(0,0,0,0.25)",
+            bottom: telaEstreita ? `calc(${recuoAbasMobile} + 16px)` : 16,
+          }}
         >
           Abrir chat
         </button>
       )}
 
-      {/* Chat: coluna lateral à direita no desktop; rodapé no celular. Fica montado e só some ao recolher */}
+      {/* Chat: coluna lateral à direita no desktop; rodapé no celular, acima da barra de abas. Fica montado e só some ao recolher */}
       <div
         style={{
           position: "absolute",
@@ -954,7 +1185,7 @@ export default function App() {
           flexDirection: "column",
           gap: 8,
           ...(telaEstreita
-            ? { left: 8, right: 8, bottom: 8, height: "45vh" }
+            ? { left: 8, right: 8, bottom: recuoAbasMobile, height: "45vh" }
             : { right: 16, top: 110, bottom: 16, width: LARGURA_CHAT }),
         }}
       >
@@ -988,6 +1219,54 @@ export default function App() {
           </button>
         </div>
       </div>
+
+      {/* Barra de abas fixa na base, só no celular: ícone + rótulo curto, as 7 abas com acesso direto (nenhuma em menu "Mais") */}
+      {telaEstreita && (
+        <div
+          style={{
+            position: "fixed",
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 35,
+            display: "flex",
+            background: "white",
+            borderTop: "1px solid #ddd",
+            boxShadow: "0 -2px 10px rgba(0,0,0,0.12)",
+            paddingBottom: "env(safe-area-inset-bottom, 0px)",
+          }}
+        >
+          {ABAS_MOBILE.map(({ aba, rotulo, icone }) => (
+            <button
+              key={aba}
+              type="button"
+              onClick={() => setTab(aba)}
+              aria-current={tab === aba ? "page" : undefined}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                height: ALTURA_ABAS_MOBILE,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 2,
+                border: "none",
+                background: "transparent",
+                color: tab === aba ? "#7c3aed" : "#555",
+                fontWeight: tab === aba ? "bold" : "normal",
+                cursor: "pointer",
+                padding: "4px 2px",
+              }}
+            >
+              <span style={{ fontSize: 18, lineHeight: 1 }}>{icone}</span>
+              <span style={{ fontSize: 10, lineHeight: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%" }}>
+                {rotulo}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Popup do detalhe da pesquisa, no centro da tela */}
       {popupPesquisaId && (

@@ -18,7 +18,18 @@ if (naoPreenchido(EMAIL) || naoPreenchido(SENHA)) {
   process.exit(2);
 }
 
-const JANELA_TEMAS_RECENTES = 20;
+// Nunca repetir um tema de TODO o histórico (não só os últimos 20): ver decisão em
+// src/pesquisa-ciclo.ts. O histórico é carregado uma vez em memória (temasConhecidos,
+// Set normalizado) ao iniciar o processo, em vez de reconsultado do banco a cada
+// ciclo — carregarHistoricoCompleto()/sincronizarTemasNovos() abaixo.
+// LIMITE_HISTORICO: tamanho máximo de temas carregados ao iniciar. 5000 é bem maior
+// que o histórico real hoje (poucas centenas, ver verificação) e cobre anos de uso
+// no ritmo atual do ciclo; existe só para não fazer o processo carregar linhas sem
+// fim se a tabela crescer muito ao longo do tempo.
+const LIMITE_HISTORICO = 5000;
+// O PostgREST do Supabase limita cada página a 1000 linhas por padrão, por isso
+// paginamos com .range() até LIMITE_HISTORICO.
+const TAMANHO_PAGINA_HISTORICO = 1000;
 const HEARTBEAT_VALIDO_MS = 3 * 60 * 1000; // página avisou nos últimos 3 min => ela pesquisa
 const CHECAGEM_MS = 60 * 1000;
 const PAUSA_MIN_MS = 30000; // pausa curta: de 30 s a 1 min entre uma pesquisa e outra
@@ -49,6 +60,69 @@ const PROBABILIDADE_CIBER = 0.25; // cerca de 1 em cada 4 pesquisas
 const supabase = createClient(URL, KEY);
 const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(new Date().toISOString(), ...a);
+
+// ---------------- Histórico completo de temas (em memória, nunca repete) ----------------
+// Mesmo critério de normalização do app (src/pesquisa-ciclo.ts normalizarTema).
+const normalizarTema = (t) => t.trim().toLowerCase();
+
+// Set normalizado com TODO o histórico já pesquisado (até LIMITE_HISTORICO), carregado
+// uma vez no início do processo (main) e atualizado a cada pesquisa salva — nunca
+// reconsultamos a tabela inteira de novo depois disso.
+const temasConhecidos = new Set();
+// Site da última pesquisa salva (própria ou da página, via sincronizarTemasNovos),
+// para não repetir a mesma fonte duas vezes seguidas.
+let ultimoSiteConhecido = null;
+// created_at da linha mais recente já incorporada ao Set, para sincronizações
+// incrementais (sincronizarTemasNovos) buscarem só o que é mais novo que isso.
+let maisRecenteConhecidoEm = null;
+
+function jaPesquisado(tema) {
+  return temasConhecidos.has(normalizarTema(tema));
+}
+
+// Lida uma única vez ao iniciar o processo: pagina até LIMITE_HISTORICO para montar
+// o Set de temas conhecidos e descobrir o site da pesquisa mais recente.
+async function carregarHistoricoCompleto(userId) {
+  let total = 0;
+  for (let desde = 0; desde < LIMITE_HISTORICO; desde += TAMANHO_PAGINA_HISTORICO) {
+    const ate = Math.min(desde + TAMANHO_PAGINA_HISTORICO, LIMITE_HISTORICO) - 1;
+    const { data: linhas, error } = await supabase
+      .from('pesquisas').select('tema, site, created_at').eq('user_id', userId)
+      .order('created_at', { ascending: false }).range(desde, ate);
+    if (error) throw new Error('pesquisas (histórico inicial): ' + error.message);
+    if (!linhas || linhas.length === 0) break;
+    if (desde === 0) {
+      ultimoSiteConhecido = linhas[0].site ?? null;
+      maisRecenteConhecidoEm = linhas[0].created_at ?? null;
+    }
+    for (const l of linhas) temasConhecidos.add(normalizarTema(l.tema));
+    total += linhas.length;
+    if (linhas.length < ate - desde + 1) break; // última página
+  }
+  return total;
+}
+
+// Chamada barata antes de cada escolha de tema (não lê a tabela inteira de novo):
+// busca só as linhas criadas depois da última conhecida, para enxergar pesquisas
+// que a aba do navegador (outro ator) possa ter salvo enquanto o servidor não
+// pesquisava (heartbeat de lia_ciclo). Em uso normal (um só ator pesquisando por
+// vez) isso devolve 0 linhas na maioria das vezes.
+async function sincronizarTemasNovos(userId) {
+  try {
+    let consulta = supabase.from('pesquisas').select('tema, site, created_at').eq('user_id', userId)
+      .order('created_at', { ascending: false }).limit(TAMANHO_PAGINA_HISTORICO);
+    consulta = maisRecenteConhecidoEm ? consulta.gt('created_at', maisRecenteConhecidoEm) : consulta;
+    const { data: novas, error } = await consulta;
+    if (error) { log('sincronizar histórico: falhou, segue com o que já tem em memória:', error.message); return; }
+    if (!novas || novas.length === 0) return;
+    for (const l of novas) temasConhecidos.add(normalizarTema(l.tema));
+    ultimoSiteConhecido = novas[0].site ?? ultimoSiteConhecido; // novas vem desc: [0] é a mais nova
+    maisRecenteConhecidoEm = novas[0].created_at ?? maisRecenteConhecidoEm;
+    log('histórico sincronizado:', novas.length, 'pesquisa(s) nova(s) de outro ator');
+  } catch (e) {
+    log('sincronizar histórico: falhou, segue com o que já tem em memória:', e instanceof Error ? e.message : e);
+  }
+}
 
 async function sortearTemas(qtd = 10) {
   const url = 'https://pt.wikipedia.org/w/api.php?action=query&list=random&rnnamespace=0' +
@@ -125,7 +199,7 @@ async function buscarFeedDireto(fonte) {
 
 // Mesma regra do app: sorteia um site (sem repetir o último); se falhar, tenta o próximo.
 async function pesquisarSiteNoServidor({ ultimoNome, jaPesquisado, pesquisarWikipedia, reg }) {
-  // Cibersegurança: mesma regra do app (ciber-temas.ts), nunca um dos últimos 20 temas
+  // Cibersegurança: mesma regra do app (ciber-temas.ts), nunca um tema de todo o histórico
   if (Math.random() < PROBABILIDADE_CIBER) {
     const livres = CIBER_TEMAS.filter((t) => !jaPesquisado(t));
     if (livres.length > 0) {
@@ -164,14 +238,12 @@ async function pesquisarSiteNoServidor({ ultimoNome, jaPesquisado, pesquisarWiki
   return null;
 }
 
-// Mesmo critério do app: nunca repete um dos últimos 20 temas.
-async function escolherTema(recentes) {
-  const normal = (t) => t.trim().toLowerCase();
-  const usados = new Set(recentes.slice(0, JANELA_TEMAS_RECENTES).map(normal));
+// Mesmo critério do app: nunca repete um tema de todo o histórico (temasConhecidos).
+async function escolherTema() {
   let candidatos = [];
   try { candidatos = await sortearTemas(10); } catch { /* sem internet: usa reserva */ }
   if (candidatos.length === 0) candidatos = [...TEMAS_RESERVA].sort(() => Math.random() - 0.5);
-  const novo = candidatos.find((t) => !usados.has(normal(t)));
+  const novo = candidatos.find((t) => !jaPesquisado(t));
   if (!novo) throw new Error('Sem tema novo disponível');
   return novo;
 }
@@ -321,19 +393,14 @@ async function pesquisarUmaVez(userId) {
 async function pesquisarESalvar(userId, reg) {
   const inicioPesquisa = Date.now();
   gravarStatus(userId, 'Pesquisando na internet');
-  const { data: linhas, error: errLinhas } = await supabase
-    .from('pesquisas').select('tema, site').eq('user_id', userId)
-    .order('created_at', { ascending: false }).limit(JANELA_TEMAS_RECENTES);
-  if (errLinhas) throw new Error('pesquisas: ' + errLinhas.message);
-  const recentes = (linhas ?? []).map((l) => l.tema);
-  const jaPesquisado = (t) => {
-    const n = t.trim().toLowerCase();
-    return recentes.slice(0, JANELA_TEMAS_RECENTES).some((x) => x.trim().toLowerCase() === n);
-  };
+  // Sincronização incremental e barata (só o que é mais novo que o já conhecido),
+  // para enxergar pesquisas que a aba do navegador tenha salvo enquanto o servidor
+  // estava parado — nunca relê a tabela inteira aqui (ver sincronizarTemasNovos).
+  await sincronizarTemasNovos(userId);
   const r = await pesquisarSiteNoServidor({
-    ultimoNome: (linhas ?? [])[0]?.site ?? null,
+    ultimoNome: ultimoSiteConhecido,
     jaPesquisado,
-    pesquisarWikipedia: async () => buscarResumo(await escolherTema(recentes)),
+    pesquisarWikipedia: async () => buscarResumo(await escolherTema()),
     reg,
   });
   if (!r) throw new Error('Nenhuma fonte deu pesquisa nova');
@@ -350,6 +417,12 @@ async function pesquisarESalvar(userId, reg) {
   }, { onConflict: 'id' });
   if (error) throw new Error('salvar pesquisa: ' + error.message);
   anotarEtapa(reg, 'ok', 'salvar pesquisa', 'pesquisa salva');
+  // Atualiza o Set em memória na hora (não espera o grafo nem o próximo ciclo):
+  // a pesquisa já está gravada no banco, então o próximo sorteio desta mesma
+  // sessão do processo não pode escolhê-la de novo.
+  temasConhecidos.add(normalizarTema(entry.topic));
+  ultimoSiteConhecido = entry.site;
+  maisRecenteConhecidoEm = new Date(entry.createdAt).toISOString();
 
   const g = grafoDePesquisa(entry);
   const nos = g.nos.map((n) => ({ ...n, user_id: userId }));
@@ -439,16 +512,59 @@ async function anotarPendentes(userId) {
   }
 }
 
+// ---------------- Comentário do dia da Lia (notícia de IA + hermes3:8b, módulo servidor/noticias-ia.mjs) ----------------
+// Roda em segundo plano (sem await no ciclo): não atrasa a pesquisa nem a pausa. Checa a cada 10 min.
+// Não gera de novo se já gravou/encontrou o comentário do dia; se a checagem no banco falhar, não gera.
+const COMENTARIO_CHECAGEM_MS = 10 * 60 * 1000;
+let ultimaChecagemComentario = 0;
+let comentarioEmAndamento = false;
+let comentarioEncerrado = null; // id do dia já resolvido (gravado, já existia ou falhou de vez)
+
+async function tentarComentarioDoDia(userId) {
+  try {
+    const { comentarioDoDia, salvarComentarioDoDia, dataLocal } = await import('./noticias-ia.mjs');
+    const id = `comentario-ia-${dataLocal()}`;
+    if (comentarioEncerrado === id) return;
+    const { data, error } = await supabase.from('grafo_nos').select('id')
+      .eq('user_id', userId).eq('id', id).maybeSingle();
+    if (error) { log('comentário do dia: checagem no banco falhou, não gera:', error.message); return; }
+    if (data) { comentarioEncerrado = id; log('comentário do dia: já existe', id); return; }
+    const dia = await comentarioDoDia();
+    if (!dia.noticia) { log('comentário do dia: sem notícia de IA agora, tenta de novo'); return; }
+    if (!dia.comentario) {
+      comentarioEncerrado = id; // o módulo não tenta de novo no mesmo dia
+      log('comentário do dia: falhou ao gerar:', dia.motivo ?? 'sem motivo');
+      return;
+    }
+    const s = await salvarComentarioDoDia(dia, { supabase, userId });
+    if (s.ok) { comentarioEncerrado = id; log('comentário do dia: gravou', id); }
+    else log('comentário do dia: falhou ao gravar:', s.motivo);
+  } catch (e) {
+    log('comentário do dia: falhou:', e instanceof Error ? e.message : e);
+  }
+}
+
+// Chamado sem await a cada volta do ciclo: se já está rodando ou faz menos de 10 min, não faz nada.
+function dispararComentarioDoDia(userId) {
+  if (comentarioEmAndamento) return;
+  if (Date.now() - ultimaChecagemComentario < COMENTARIO_CHECAGEM_MS) return;
+  ultimaChecagemComentario = Date.now();
+  comentarioEmAndamento = true;
+  tentarComentarioDoDia(userId).finally(() => { comentarioEmAndamento = false; });
+}
+
 async function main() {
   const { data, error } = await supabase.auth.signInWithPassword({ email: EMAIL, password: SENHA });
   if (error || !data.user) throw new Error('login falhou: ' + (error?.message ?? 'sem usuário'));
   const userId = data.user.id;
-  log('logado; aguardando janela sem página pesquisando');
+  const totalCarregado = await carregarHistoricoCompleto(userId);
+  log(`logado; histórico carregado: ${totalCarregado} pesquisa(s), ${temasConhecidos.size} tema(s) distinto(s); aguardando janela sem página pesquisando`);
 
   while (true) {
     try {
       // Anotar nunca pode impedir a pesquisa: erro de anotação só vira log
       await anotarPendentes(userId).catch((e) => log('anotações:', e instanceof Error ? e.message : e));
+      dispararComentarioDoDia(userId); // em segundo plano: não espera a geração (até 30 s)
       if (await pagina_fresca(userId)) {
         await dormir(CHECAGEM_MS);
         continue;
