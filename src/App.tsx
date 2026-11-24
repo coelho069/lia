@@ -186,6 +186,11 @@ export const App: React.FC = () => {
   const [temaPesquisa, setTemaPesquisa] = useState("");
   const [resultadoPesquisa, setResultadoPesquisa] = useState<{ tema: string; resumo: string; link: string } | null>(null);
   const [ultimaPesquisaEm, setUltimaPesquisaEm] = useState(0);
+  // Refs para ler valores mutáveis sem causar re-execução do efeito
+  const pesquisandoRef = useRef(pesquisando);
+  pesquisandoRef.current = pesquisando;
+  const ultimaPesquisaEmRef = useRef(ultimaPesquisaEm);
+  ultimaPesquisaEmRef.current = ultimaPesquisaEm;
 
   // --- Sessão: checa o Supabase primeiro; IP só como fallback ----------
   // Mantém o login após reload via supabase.auth.getSession() e onAuthStateChange.
@@ -238,11 +243,13 @@ export const App: React.FC = () => {
   }, []);
 
   // --- Ciclo de vida da Lia: tick, dia/noite, decisão automática, auto-save ---
+  // Roda apenas uma vez (deps []). Valores mutáveis são lidos via refs para não causar re-execução.
   useEffect(() => {
     let mounted = true;
     let tickTimer: any;
     let hourTimer: any;
     let decisionTimer: any;
+    let pesquisaTimer: any;
 
     const TICK_INTERVAL_MS = 4000; // vida decai a cada 4s
     const HOUR_INTERVAL_MS = 10000; // hora avança a cada 10s
@@ -278,8 +285,10 @@ export const App: React.FC = () => {
           next = { ...next, energia: Math.min(100, next.energia + 15) };
         } else if (action === "pesquisar") {
           next = { ...next, xp: Math.min(999, next.xp + 10), energia: Math.max(0, next.energia - 5) };
-          // Inicia pesquisa aleatória
-          void iniciarPesquisa();
+          // Inicia pesquisa aleatória (se não estiver já pesquisando)
+          if (!pesquisandoRef.current && Date.now() - ultimaPesquisaEmRef.current >= 300000) {
+            void iniciarPesquisa();
+          }
         } else if (action === "explorar") {
           next = { ...next, energia: Math.max(0, next.energia - 5), sociability: Math.max(0, next.sociability - 5) };
         }
@@ -304,16 +313,16 @@ export const App: React.FC = () => {
     ];
 
     async function iniciarPesquisa() {
-      if (pesquisando) return;
+      if (pesquisandoRef.current) return;
       const agora = Date.now();
-      if (agora - ultimaPesquisaEm < 300000) return; // 5 min entre pesquisas
+      if (agora - ultimaPesquisaEmRef.current < 300000) return; // 5 min entre pesquisas
       setPesquisando(true);
+      pesquisandoRef.current = true;
       const tema = TEMA_ALEATORIO[Math.floor(Math.random() * TEMA_ALEATORIO.length)];
       setTemaPesquisa(tema);
       try {
         const res = await fetch(
           `https://pt.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(tema)}&format=json&origin=*`,
-          { signal: AbortSignal.timeout(10000) }
         );
         if (!res.ok) throw new Error("Falha na Wikipedia");
         const data = await res.json();
@@ -332,6 +341,7 @@ export const App: React.FC = () => {
             { from: "person", text: "Pesquisei sobre " + payload.tema + ". " + payload.resumo + " Fonte: " + payload.link },
           ]);
           setUltimaPesquisaEm(agora);
+          ultimaPesquisaEmRef.current = agora;
         } else {
           setMessages((prev) => [...prev, { from: "person", text: "Não encontrei nada sobre " + tema + " na Wikipedia." }]);
         }
@@ -339,6 +349,7 @@ export const App: React.FC = () => {
         setMessages((prev) => [...prev, { from: "person", text: "Não consegui pesquisar agora. A internet falhou. Tento de novo depois." }]);
       } finally {
         setPesquisando(false);
+        pesquisandoRef.current = false;
       }
     }
 
@@ -347,7 +358,6 @@ export const App: React.FC = () => {
     doDecision();
 
     // Pesquisa automática a cada 5 minutos
-    let pesquisaTimer: any;
     const agendarPesquisa = () => {
       clearTimeout(pesquisaTimer);
       pesquisaTimer = setTimeout(() => {
@@ -368,7 +378,7 @@ export const App: React.FC = () => {
       clearInterval(decisionTimer);
       clearTimeout(pesquisaTimer);
     };
-  }, [life, pesquisando, ultimaPesquisaEm]);
+  }, []);
 
   // Pet3D position callback ref (só define o ref, sem recriar callbacks a cada render).
   useEffect(() => {
