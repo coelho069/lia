@@ -267,38 +267,6 @@ export const App: React.FC = () => {
       setHour((h) => (h + 1) % 24);
     };
 
-    const doDecision = () => {
-      setLife((prev) => {
-        const { action, actionText } = decideNextAction(prev);
-        let next = { ...prev, acaoAtual: action, ultimaAcaoEm: Date.now() };
-
-        // Aplicar efeitos da ação nos atributos
-        if (action === "dormir") {
-          next = { ...next, energia: Math.min(100, next.energia + 30), humor: Math.min(100, next.humor + 10) };
-        } else if (action === "comer") {
-          next = { ...next, fome: Math.min(100, next.fome + 30), energia: Math.min(100, next.energia + 10) };
-        } else if (action === "brincar") {
-          next = { ...next, humor: Math.min(100, next.humor + 15), energia: Math.max(0, next.energia - 10) };
-        } else if (action === "conversar") {
-          next = { ...next, sociability: Math.min(100, next.sociability + 15), humor: Math.min(100, next.humor + 10) };
-        } else if (action === "descansar") {
-          next = { ...next, energia: Math.min(100, next.energia + 15) };
-        } else if (action === "pesquisar") {
-          next = { ...next, xp: Math.min(999, next.xp + 10), energia: Math.max(0, next.energia - 5) };
-          // Inicia pesquisa aleatória (se não estiver já pesquisando)
-          if (!pesquisandoRef.current && Date.now() - ultimaPesquisaEmRef.current >= 300000) {
-            void iniciarPesquisa();
-          }
-        } else if (action === "explorar") {
-          next = { ...next, energia: Math.max(0, next.energia - 5), sociability: Math.max(0, next.sociability - 5) };
-        }
-
-        saveLife(next);
-        setLastAction(actionText);
-        return next;
-      });
-    };
-
     const TEMA_ALEATORIO = [
       "Brasil",
       "Japão",
@@ -352,6 +320,38 @@ export const App: React.FC = () => {
         pesquisandoRef.current = false;
       }
     }
+
+    const doDecision = () => {
+      setLife((prev) => {
+        const { action, actionText } = decideNextAction(prev);
+        let next = { ...prev, acaoAtual: action, ultimaAcaoEm: Date.now() };
+
+        // Aplicar efeitos da ação nos atributos
+        if (action === "dormir") {
+          next = { ...next, energia: Math.min(100, next.energia + 30), humor: Math.min(100, next.humor + 10) };
+        } else if (action === "comer") {
+          next = { ...next, fome: Math.min(100, next.fome + 30), energia: Math.min(100, next.energia + 10) };
+        } else if (action === "brincar") {
+          next = { ...next, humor: Math.min(100, next.humor + 15), energia: Math.max(0, next.energia - 10) };
+        } else if (action === "conversar") {
+          next = { ...next, sociability: Math.min(100, next.sociability + 15), humor: Math.min(100, next.humor + 10) };
+        } else if (action === "descansar") {
+          next = { ...next, energia: Math.min(100, next.energia + 15) };
+        } else if (action === "pesquisar") {
+          next = { ...next, xp: Math.min(999, next.xp + 10), energia: Math.max(0, next.energia - 5) };
+          // Inicia pesquisa aleatória (se não estiver já pesquisando)
+          if (!pesquisandoRef.current && Date.now() - ultimaPesquisaEmRef.current >= 300000) {
+            void iniciarPesquisa();
+          }
+        } else if (action === "explorar") {
+          next = { ...next, energia: Math.max(0, next.energia - 5), sociability: Math.max(0, next.sociability - 5) };
+        }
+
+        saveLife(next);
+        setLastAction(actionText);
+        return next;
+      });
+    };
 
     doTick();
     advanceHour();
