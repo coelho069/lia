@@ -154,10 +154,81 @@ const noticiasIaPlugin = {
   },
 }
 
+// Middleware para adicionar headers de segurança e cache-control
+const securityHeadersPlugin = {
+  name: 'lia-security-headers',
+  configureServer(server: any) {
+    return () => {
+      server.middlewares.use((_req: any, res: any, next: any) => {
+        // X-Frame-Options: impede clickjacking, só a Lia pode embutir a Lia
+        res.setHeader('X-Frame-Options', 'SAMEORIGIN')
+        // X-Content-Type-Options: evita MIME sniffing
+        res.setHeader('X-Content-Type-Options', 'nosniff')
+        // Content-Security-Policy: proteção básica contra XSS e injeção
+        // - default-src 'self': apenas conteúdo da mesma origem por padrão
+        // - script-src 'self' 'unsafe-inline': inline por causa do Vite HMR
+        // - style-src 'self' 'unsafe-inline': inline por causa do Tailwind
+        // - img-src 'self' data: https:: imagens próprias, data URIs e HTTPS
+        // - api/lia-chat: proxy do Ollama (mesma origem)
+        res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://api.ipify.org https://supabase.co https://*.supabase.co; frame-ancestors 'self'")
+        // Referrer-Policy: reduz o vazamento de informações
+        res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+        // Permissions-Policy: limita acesso a recursos de hardware
+        res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()')
+        // index.html: sempre fresco (no-cache), força revalidação; assets versionados podem ser cache agressivo
+        const isHtml = _req.url === '/' || _req.url.endsWith('.html')
+        const isVersionedAsset = _req.url.match(/-[a-zA-Z0-9]{8}\.(?:js|css|woff2|png|svg|jpg|jpeg|gif|webp)$/)
+
+        if (isHtml) {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
+        } else if (isVersionedAsset) {
+          // Assets versionados (hash de 8 caracteres separado por hífen): cache de 1 ano
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+        }
+        next()
+      })
+    }
+  },
+  configurePreviewServer(server: any) {
+    return () => {
+      server.middlewares.use((_req: any, res: any, next: any) => {
+        res.setHeader('X-Frame-Options', 'SAMEORIGIN')
+        res.setHeader('X-Content-Type-Options', 'nosniff')
+        res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://api.ipify.org https://supabase.co https://*.supabase.co; frame-ancestors 'self'")
+        res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+        res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()')
+        // index.html: sempre fresco (no-cache), força revalidação; assets versionados podem ser cache agressivo
+        const isHtml = _req.url === '/' || _req.url.endsWith('.html')
+        const isVersionedAsset = _req.url.match(/-[a-zA-Z0-9]{8}\.(?:js|css|woff2|png|svg|jpg|jpeg|gif|webp)$/)
+
+        if (isHtml) {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
+        } else if (isVersionedAsset) {
+          // Assets versionados (hash de 8 caracteres separado por hífen): cache de 1 ano
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+        }
+        next()
+      })
+    }
+  },
+}
+
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), feedsPlugin, refletorPlugin, noticiasIaPlugin],
+  plugins: [react(), feedsPlugin, refletorPlugin, noticiasIaPlugin, securityHeadersPlugin],
   server: { proxy: ollamaProxy },
   // Domínios públicos da Lia (atrás do Nginx). Sem isso o Vite recusa o Host do domínio.
   preview: { proxy: ollamaProxy, allowedHosts: ['liaonline.blog.br', 'www.liaonline.blog.br', 'lia.nexoralabs.dev.br'] },
+  build: {
+    // Cache-busting automático: hashing de arquivo garante que navegador sempre recebe versão nova
+    rollupOptions: {
+      output: {
+        entryFileNames: 'assets/[name]-[hash].js',
+        chunkFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash][extname]',
+      },
+    },
+    // Manifest para debug (opcional)
+    manifest: true,
+  },
 })
