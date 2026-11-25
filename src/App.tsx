@@ -344,8 +344,8 @@ export default function App() {
   // Layout do chat: lateral recolhível no desktop; rodapé recolhível no celular
   const LARGURA_CHAT = 340;
   // Detecta viewport real mesmo com "Versão para computador" ativada no Chrome Android.
-  // visualViewport.width retorna o tamanho real do viewport; fallback para innerWidth se indisponível.
-  const obterLarguraViewport = () => window.visualViewport?.width ?? window.innerWidth;
+  // window.screen.width retorna a largura física real da tela; fallback para innerWidth se indisponível.
+  const obterLarguraViewport = () => window.screen.width ?? window.innerWidth;
   const [telaEstreita, setTelaEstreita] = useState(() => typeof window !== "undefined" && obterLarguraViewport() <= 700);
   const [chatAberto, setChatAberto] = useState(() => !(typeof window !== "undefined" && obterLarguraViewport() <= 700));
   useEffect(() => {
@@ -1018,6 +1018,7 @@ export default function App() {
 
   return (
     <div style={{ position: "fixed", inset: 0, overflow: "hidden", fontFamily: "system-ui, sans-serif" }}>
+
       {/* Cena 3D: sempre montada, para a Lia não recomeçar ao trocar de aba */}
       <div style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: chatLateral ? LARGURA_CHAT + 16 : 0, zIndex: 0, display: tab === "Cena" ? "block" : "none" }}>
         <Suspense fallback={null}>
