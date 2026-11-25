@@ -170,40 +170,114 @@ function gravarCachePesquisas(lista: ResearchTopic[]): void {
   }
 }
 
+/* ---- Rate limit para login (proteção contra força bruta) ---- */
+const TENTATIVAS_LIMITE = 5; // máximo de tentativas
+const JANELA_TEMPO_MS = 60000; // 1 minuto
+const BLOQUEIO_MS = 60000; // bloqueia por 1 minuto após atingir o limite
+
+class LimitadorTentativas {
+  private tentativas: number[] = [];
+  private bloqueadoAte: number = 0;
+
+  registrarTentativa(): void {
+    const agora = Date.now();
+    // Remove tentativas fora da janela de tempo
+    this.tentativas = this.tentativas.filter((t) => agora - t < JANELA_TEMPO_MS);
+    this.tentativas.push(agora);
+  }
+
+  estaBloquedo(): boolean {
+    return Date.now() < this.bloqueadoAte;
+  }
+
+  temporAteDesbloqueio(): number {
+    return Math.max(0, Math.ceil((this.bloqueadoAte - Date.now()) / 1000));
+  }
+
+  verificarBloqueia(): boolean {
+    if (this.estaBloquedo()) return true;
+    if (this.tentativas.length >= TENTATIVAS_LIMITE) {
+      this.bloqueadoAte = Date.now() + BLOQUEIO_MS;
+      this.tentativas = [];
+      return true;
+    }
+    return false;
+  }
+
+  tentativasRestantes(): number {
+    return Math.max(0, TENTATIVAS_LIMITE - this.tentativas.length);
+  }
+}
+
+const limitadorLogin = new LimitadorTentativas();
+
 /* ---------------- Tela de login ---------------- */
 function LoginScreen({ onLogin }: { onLogin: () => void }) {
   const [email, setEmail] = useState("");
   const [senha, setSenha] = useState("");
   const [erro, setErro] = useState<string | null>(null);
   const [ocupado, setOcupado] = useState(false);
+  const [bloqueadoTempo, setBloqueadoTempo] = useState(0);
+
+  useEffect(() => {
+    if (!limitadorLogin.estaBloquedo()) {
+      setBloqueadoTempo(0);
+      return;
+    }
+    const temporizador = setInterval(() => {
+      const tempo = limitadorLogin.temporAteDesbloqueio();
+      setBloqueadoTempo(tempo);
+      if (tempo <= 0) clearInterval(temporizador);
+    }, 1000);
+    return () => clearInterval(temporizador);
+  }, [ocupado]);
 
   async function entrar(e: React.FormEvent) {
     e.preventDefault();
+    if (limitadorLogin.verificarBloqueia()) {
+      const tempo = limitadorLogin.temporAteDesbloqueio();
+      setErro(`Muitas tentativas. Tente de novo em ${tempo} segundo${tempo === 1 ? "" : "s"}.`);
+      setBloqueadoTempo(tempo);
+      return;
+    }
+
     setOcupado(true);
     setErro(null);
+    limitadorLogin.registrarTentativa();
+
     const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: senha });
     setOcupado(false);
+
     if (error) {
-      setErro("E-mail ou senha incorretos.");
+      const tentativas = limitadorLogin.tentativasRestantes();
+      if (tentativas > 0) {
+        setErro(`E-mail ou senha incorretos. ${tentativas} tentativa${tentativas === 1 ? "" : "s"} restante${tentativas === 1 ? "" : "s"}.`);
+      } else {
+        const tempo = limitadorLogin.temporAteDesbloqueio();
+        setErro(`Muitas tentativas. Tente de novo em ${tempo} segundo${tempo === 1 ? "" : "s"}.`);
+        setBloqueadoTempo(tempo);
+      }
       return;
     }
     onLogin();
   }
+
+  const desabilitado = ocupado || bloqueadoTempo > 0;
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#87ceeb" }}>
       <form onSubmit={entrar} style={{ background: "white", padding: 24, borderRadius: 12, width: "min(340px, 92vw)", boxShadow: "0 6px 24px rgba(0,0,0,0.2)" }}>
         <h2 style={{ margin: "0 0 14px", color: "#1a1a2e" }}>Lia</h2>
         <label style={{ fontSize: 13, color: "#555" }}>E-mail</label>
-        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="username"
-          style={{ width: "100%", padding: 8, margin: "4px 0 10px", borderRadius: 6, border: "1px solid #ccc", boxSizing: "border-box" }} />
+        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="username" disabled={desabilitado}
+          style={{ width: "100%", padding: 8, margin: "4px 0 10px", borderRadius: 6, border: "1px solid #ccc", boxSizing: "border-box", opacity: desabilitado ? 0.6 : 1, cursor: desabilitado ? "not-allowed" : "auto" }} />
         <label style={{ fontSize: 13, color: "#555" }}>Senha</label>
-        <input type="password" value={senha} onChange={(e) => setSenha(e.target.value)} required autoComplete="current-password"
-          style={{ width: "100%", padding: 8, margin: "4px 0 12px", borderRadius: 6, border: "1px solid #ccc", boxSizing: "border-box" }} />
+        <input type="password" value={senha} onChange={(e) => setSenha(e.target.value)} required autoComplete="current-password" disabled={desabilitado}
+          style={{ width: "100%", padding: 8, margin: "4px 0 12px", borderRadius: 6, border: "1px solid #ccc", boxSizing: "border-box", opacity: desabilitado ? 0.6 : 1, cursor: desabilitado ? "not-allowed" : "auto" }} />
         {erro && <div role="alert" style={{ color: "#b91c1c", fontSize: 13, marginBottom: 10 }}>{erro}</div>}
-        <button type="submit" disabled={ocupado}
-          style={{ width: "100%", padding: 10, borderRadius: 6, border: "none", background: "#7c3aed", color: "white", fontWeight: "bold", cursor: "pointer" }}>
-          {ocupado ? "Entrando..." : "Entrar"}
+        <button type="submit" disabled={desabilitado}
+          style={{ width: "100%", padding: 10, borderRadius: 6, border: "none", background: desabilitado ? "#cccccc" : "#7c3aed", color: "white", fontWeight: "bold", cursor: desabilitado ? "not-allowed" : "pointer" }}>
+          {ocupado ? "Entrando..." : bloqueadoTempo > 0 ? `Tente em ${bloqueadoTempo}s` : "Entrar"}
         </button>
       </form>
     </div>
@@ -269,10 +343,13 @@ export default function App() {
 
   // Layout do chat: lateral recolhível no desktop; rodapé recolhível no celular
   const LARGURA_CHAT = 340;
-  const [telaEstreita, setTelaEstreita] = useState(() => typeof window !== "undefined" && window.innerWidth <= 700);
-  const [chatAberto, setChatAberto] = useState(() => !(typeof window !== "undefined" && window.innerWidth <= 700));
+  // Detecta viewport real mesmo com "Versão para computador" ativada no Chrome Android.
+  // visualViewport.width retorna o tamanho real do viewport; fallback para innerWidth se indisponível.
+  const obterLarguraViewport = () => window.visualViewport?.width ?? window.innerWidth;
+  const [telaEstreita, setTelaEstreita] = useState(() => typeof window !== "undefined" && obterLarguraViewport() <= 700);
+  const [chatAberto, setChatAberto] = useState(() => !(typeof window !== "undefined" && obterLarguraViewport() <= 700));
   useEffect(() => {
-    const aoRedimensionar = () => setTelaEstreita(window.innerWidth <= 700);
+    const aoRedimensionar = () => setTelaEstreita(obterLarguraViewport() <= 700);
     window.addEventListener("resize", aoRedimensionar);
     return () => window.removeEventListener("resize", aoRedimensionar);
   }, []);
@@ -501,7 +578,15 @@ export default function App() {
     if (dadosProntos && vidaNaTelaRef.current) gravarMinutosJogo(vidaNaTelaRef.current, minutosJogo);
   }, [dadosProntos, minutosJogo]);
 
-  /* ---- Vida: decai, decide ações e avança a hora ---- */
+  /* ---- Vida: agora roda no servidor (pesquisa-servico.mjs) ---- */
+  useEffect(() => {
+    // Ciclo desabilitado: a vida agora é mantida pelo servidor 24/7 (iniciarCicloVida)
+    // e sincronizada aqui apenas para leitura/renderização. Sem mudanças locais.
+    // Para ativar de volta: descomentar o code abaixo
+    return () => {};
+  }, [dadosProntos]);
+
+  /* Código do ciclo de vida desabilitado (roda no servidor):
   useEffect(() => {
     if (!dadosProntos) return;
     const tick = setInterval(() => setLife((v) => tickLife(v)), TICK_MS);
@@ -536,7 +621,7 @@ export default function App() {
       clearInterval(decisao);
       clearInterval(salvar);
     };
-  }, [dadosProntos]);
+  }, [dadosProntos]); */
 
   /* ---- Chat: fila sequencial com o cérebro local ---- */
   function responderLia(pergunta: string) {
@@ -654,7 +739,35 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loggedIn]);
 
-  /* ---- Ciclo de pesquisa: levantar, passear, computador, digitar, pesquisar, ler, salvar ---- */
+  /* ---- Heartbeat: marcar página como viva para o servidor (sem pesquisar) ---- */
+  useEffect(() => {
+    if (!loggedIn) return;
+
+    // Marca página como viva imediatamente
+    void marcarPaginaPesquisando().catch(() => {});
+
+    // Repete a cada 60 segundos
+    const heartbeat = setInterval(() => {
+      void marcarPaginaPesquisando().catch(() => {});
+    }, 60000);
+
+    return () => clearInterval(heartbeat);
+  }, [loggedIn]);
+
+  /* ---- Ciclo de pesquisa: agora roda no servidor (pesquisa-servico.mjs) ---- */
+  useEffect(() => {
+    if (!loggedIn || !dadosProntos) {
+      setPesquisando(false);
+      setEstadoPesquisa(null);
+      return;
+    }
+    // Ciclo desabilitado: a pesquisa agora é mantida pelo servidor 24/7 (pesquisarUmaVez em loop)
+    // A aba sincroniza pesquisas do Supabase em atualizarPesquisas() e ao voltar (visibilitychange).
+    // Sem participação local no ciclo. Para ativar de volta: descomentar o code abaixo.
+    return () => {};
+  }, [loggedIn, dadosProntos]);
+
+  /* Código do ciclo de pesquisa desabilitado (roda no servidor):
   useEffect(() => {
     if (!loggedIn || !dadosProntos) {
       setPesquisando(false);
@@ -844,7 +957,7 @@ export default function App() {
       setPesquisando(false);
       setEstadoPesquisa(null);
     };
-  }, [loggedIn, dadosProntos]);
+  }, [loggedIn, dadosProntos]); */
 
   // A cena avisa a fase física da Lia (só pesquisa com ela digitando)
   const aoMudarFase = (fase: string) => {
@@ -1019,7 +1132,7 @@ export default function App() {
       )}
       {(erroCarga || erroVida) && (
         <div role="alert" style={{ position: "absolute", top: 8, right: 8, zIndex: 30, background: "#fee2e2", color: "#7f1d1d", padding: 10, borderRadius: 6, fontSize: 13, maxWidth: "calc(100vw - 16px)", boxSizing: "border-box" }}>
-          Não consegui ler do Supabase: {erroCarga ?? "Vida: " + erroVida + " (a vida não é gravada até ler)"}.
+          Não consegui ler do Supabase: {[erroCarga, erroVida && "Vida: " + erroVida + " (a vida não é gravada até ler)"].filter(Boolean).join("; ")}.
           <button type="button" onClick={() => setTentativaCarga((n) => n + 1)} style={{ marginLeft: 10, padding: "4px 10px", background: "#7c3aed", color: "white", border: "none", borderRadius: 4, cursor: "pointer" }}>
             Tentar de novo
           </button>
