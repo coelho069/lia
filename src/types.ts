@@ -36,6 +36,7 @@ export interface ResearchTopic {
   summary: string;
   sources: string[]; // literal URLs
   createdAt: number;
+  site?: string; // nome do site de onde veio (ex.: "G1"); vazio em pesquisas antigas
 }
 
 export interface DrawingEntry {

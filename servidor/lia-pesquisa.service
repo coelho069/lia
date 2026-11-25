@@ -1,0 +1,16 @@
+[Unit]
+Description=Lia pesquisa na VPS (sem depender da aba)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/home/debian/bichinho-ia
+ExecStart=/home/debian/.nvm/versions/node/v22.23.5/bin/node --env-file=/home/debian/bichinho-ia/servidor/.env /home/debian/bichinho-ia/servidor/pesquisa-servico.mjs
+Restart=always
+RestartSec=10
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=multi-user.target
